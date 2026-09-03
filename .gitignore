@@ -1,0 +1,6 @@
+.cache/
+.state/
+reports/
+config.json
+__pycache__/
+*.pyc

@@ -1,0 +1,9 @@
+{
+  "reviewer": "@me",
+  "repositories": [],
+  "exclude_authors": ["@me"],
+  "claim_ttl_minutes": 180,
+  "max_concurrent_reviews": 4,
+  "codex_project_id": "REPLACE_WITH_YOUR_CODEX_PROJECT_ID",
+  "local_repositories": {}
+}
