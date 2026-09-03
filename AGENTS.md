@@ -24,6 +24,7 @@ Use this final gate before raising any finding: **introduced here, reachable, co
 - Give the reviewer a short, ordered path through the highest-value files or behaviors. Do not turn a small review into a tutorial.
 - Clearly separate code findings, merge/CI readiness, and review limitations. A red unrelated check is not a code finding; a clean review is not proof that unexecuted code works.
 - On a new head, verify previous findings and say when an important one is resolved. Do not carry stale findings forward.
+- Treat `.state/reviews.db` as the authoritative lifecycle record. On a re-request, use its prior report, accepted findings, GitHub review state, and task binding instead of reconstructing history from memory alone.
 
 ## Review radius
 
@@ -43,9 +44,10 @@ Use this final gate before raising any finding: **introduced here, reachable, co
 
 ## Autonomy boundary
 
-- Reviews are report-only unless the user explicitly changes this policy.
-- Never post to GitHub, approve a pull request, request changes, push commits, or modify the reviewed repository.
-- A dispatcher may reserve pending candidates, create exactly one local Codex task per reservation, and archive itself after a successful or idle dispatch. It must not review code.
+- Automated reviews are report-only. Never post to GitHub, approve a pull request, request changes, push commits, or modify the reviewed repository during dispatch or review generation.
+- GitHub review writes are permitted only after the user explicitly asks in the PR's continuing task and the applicable `draft-pr-review` or `request-pr-changes` skill has been followed. Those skills may create a pending review or submit `REQUEST_CHANGES`; approval remains out of scope.
+- A dispatcher may reserve pending candidates, continue the PR's existing local Codex task or create its first task, and archive itself after a successful or idle dispatch. It must not review code.
 - A review worker may prepare and review only its exact assigned claim. It must not claim other work or create more tasks.
-- Codex task creation, title updates, and dispatcher archival are permitted only for this coordination flow. Failed dispatchers and all worker tasks remain visible.
-- The only permitted filesystem writes are reviewer state, cached checkouts, and local Markdown reports under this project.
+- Keep one continuing Codex task per repository and PR number. Bind new tasks immediately, and send later review rounds to the stored task so discussion and accepted findings stay together.
+- Codex task creation, continuation, title updates, and dispatcher archival are permitted only for this coordination flow. Failed dispatchers and all worker tasks remain visible.
+- The only routine filesystem writes are reviewer state, cached checkouts, machine-readable findings, and local Markdown reports under this project.

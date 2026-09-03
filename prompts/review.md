@@ -12,6 +12,12 @@ python3 bin/review_queue.py prepare --key '<exact claim key>'
 
 Never run `claim` or `dispatch` from a worker, and never switch to another candidate if preparation fails. Review only the returned candidate's `diff_range` inside `checkout_path`.
 
+The preparation result also includes `suggested_findings_path` and, on later rounds for the same PR, `previous_review`. Refresh the active lease after context gathering and again before writing the final report:
+
+```sh
+python3 bin/review_queue.py heartbeat --key '<exact claim key>'
+```
+
 The dispatcher supplies an initial task title. After resolving Linear context, correct it with the app's `set_thread_title` action if a different issue is clearly primary. Omit `threadId` so the action targets this task. Keep this format:
 
 ```text
@@ -39,7 +45,7 @@ Distill the result into four questions:
 
 If Linear is unavailable or no trustworthy match exists, continue the code review and state the missing context once. Context retrieval must not turn a review into a project archaeology exercise.
 
-For a re-review, inspect prior reports for the same PR and existing GitHub review discussion as needed. Revalidate earlier findings against the new head; do not repeat a fixed or already-covered concern.
+For a re-review, use `previous_review` as the starting point. Read its report and inspect each carried accepted, drafted, submitted, or still-open finding against the new head. Compare the previous head with the current head so the briefing can say what changed since the last review. Classify every carried finding as `resolved`, `still_open`, or `obsolete`; do not repeat a fixed concern as a new finding. Existing GitHub discussion may be read when needed to understand whether a concern was addressed.
 
 ## 3. Explain the change
 
@@ -107,6 +113,10 @@ Context: [ISSUE-ID](...) · [Project](...) · [Relevant document](...)
 - Three to five short before-to-after or behavior bullets.
 - State important non-goals only when they prevent misunderstanding.
 
+## Since your last review
+
+- On re-reviews only: two or three short bullets covering the meaningful updates and the status of previously accepted findings.
+
 ## Findings
 
 No findings.
@@ -160,12 +170,44 @@ Keep the report easy to scan:
 - Omit empty optional material instead of padding the report.
 - Always end the report with direct links to the PR and primary Linear issue. If no Linear issue was found, end with the PR link and `Linear issue: not found` rather than inventing one.
 
+Also write a machine-readable JSON document to `suggested_findings_path`, even when there are no new findings:
+
+```json
+{
+  "findings": [
+    {
+      "id": "F-01",
+      "severity": "P2",
+      "title": "Short finding title",
+      "path": "path/to/file.rb",
+      "start_line": 42,
+      "end_line": 47,
+      "explanation": "Concrete mechanism and impact.",
+      "failure_example": "Specific input, state, or sequence that fails.",
+      "safeguard": "Small implementation sketch or focused test.",
+      "safeguard_kind": "implementation",
+      "review_comment": "Concise, self-contained GitHub-ready comment including the failure and a helpful example safeguard."
+    }
+  ],
+  "previous_findings": [
+    {
+      "claim_key": "exact earlier claim key",
+      "finding_id": "F-01",
+      "status": "resolved",
+      "note": "What changed and where it was verified."
+    }
+  ]
+}
+```
+
+Use stable IDs `F-01`, `F-02`, and so on within each round. `safeguard_kind` is `implementation` or `regression_test`. Omit `start_line` and `end_line` only when the concern cannot be anchored to a changed line; such a finding becomes part of the review body instead of an inline comment. The JSON must contain only findings that pass the full review gate. `previous_findings` must reconcile every carried finding from `previous_review`.
+
 ## 6. Complete the cycle
 
 Run:
 
 ```sh
-python3 bin/review_queue.py complete --key '<claim key>' --report '<report path>'
+python3 bin/review_queue.py complete --key '<claim key>' --report '<report path>' --findings '<findings path>'
 ```
 
 Return a concise outcome and the report to the Scheduled inbox. The final line of the inbox message must be `[Open PR #123](...) · [Open ISSUE-ID](...)`. If no Linear issue was found, use `[Open PR #123](...) · Linear issue: not found`. Do not post anything to GitHub.

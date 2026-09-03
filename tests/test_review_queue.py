@@ -31,10 +31,35 @@ def candidate(sha: str = "a" * 40, number: int = 12) -> dict:
     }
 
 
+def finding_document() -> dict:
+    return {
+        "findings": [
+            {
+                "id": "F-01",
+                "severity": "P2",
+                "title": "Keep widget ownership stable",
+                "path": "app/models/widget.rb",
+                "start_line": 12,
+                "end_line": 15,
+                "explanation": "Changing the owner breaks later reconciliation.",
+                "failure_example": "A retry loads credentials for another owner.",
+                "safeguard": "Reject owner changes after registration.",
+                "safeguard_kind": "implementation",
+                "review_comment": (
+                    "The owner remains writable after registration. For example, a "
+                    "retry can load another owner's credentials. Could we reject owner "
+                    "changes after registration and cover that with a focused test?"
+                ),
+            }
+        ],
+        "previous_findings": [],
+    }
+
+
 class QueueTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
-        self.state_path = Path(self.temporary.name) / "state.json"
+        self.state_path = Path(self.temporary.name) / "state.db"
         self.config = {
             "claim_ttl_minutes": 180,
             "codex_project_id": "project-test-id",
@@ -42,6 +67,43 @@ class QueueTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def complete_with_finding(self, item: dict) -> tuple[Path, Path]:
+        report = Path(self.temporary.name) / f"report-{item['number']}.md"
+        findings = Path(self.temporary.name) / f"findings-{item['number']}.json"
+        report.write_text("# Review\n")
+        findings.write_text(json.dumps(finding_document()))
+        review_queue.complete_review(
+            self.state_path, item["key"], report, findings
+        )
+        return report, findings
+
+    @patch.object(review_queue, "run_json")
+    def test_latest_review_request_event_uses_last_paginated_match(
+        self, run_json_mock
+    ) -> None:
+        run_json_mock.return_value = [
+            [
+                {
+                    "id": 10,
+                    "event": "review_requested",
+                    "created_at": "2026-09-01T00:00:00Z",
+                    "requested_reviewer": {"login": "nick"},
+                }
+            ],
+            [
+                {
+                    "id": 20,
+                    "event": "review_requested",
+                    "created_at": "2026-09-02T00:00:00Z",
+                    "requested_reviewer": {"login": "nick"},
+                }
+            ],
+        ]
+
+        event = review_queue.latest_review_request_event("acme/widgets", 12, "nick")
+
+        self.assertEqual(event["id"], "20")
 
     @patch.object(review_queue, "candidates")
     def test_completed_sha_is_not_claimed_twice(self, candidates_mock) -> None:
@@ -70,15 +132,31 @@ class QueueTests(unittest.TestCase):
         self.assertIsNone(review_queue.claim_candidate(self.config, self.state_path))
 
     @patch.object(review_queue, "candidates")
+    def test_new_head_waits_for_active_round_on_same_pr(self, candidates_mock) -> None:
+        first = candidate("a" * 40)
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        candidates_mock.return_value = [second]
+
+        self.assertIsNone(review_queue.claim_candidate(self.config, self.state_path))
+
+    @patch.object(review_queue, "candidates")
     def test_expired_claim_can_be_reclaimed(self, candidates_mock) -> None:
         item = candidate()
         candidates_mock.return_value = [item]
         review_queue.claim_candidate(self.config, self.state_path)
-        state = review_queue.read_state(self.state_path)
-        state["entries"][item["key"]]["claimed_at"] = review_queue.isoformat(
-            review_queue.now() - timedelta(minutes=181)
+        connection = review_queue.connect_state(self.state_path)
+        connection.execute(
+            "UPDATE review_rounds SET claimed_at = ? WHERE claim_key = ?",
+            (
+                review_queue.isoformat(
+                    review_queue.now() - timedelta(minutes=181)
+                ),
+                item["key"],
+            ),
         )
-        review_queue.write_state(self.state_path, state)
+        connection.close()
         self.assertEqual(review_queue.claim_candidate(self.config, self.state_path), item)
 
     @patch.object(review_queue, "candidates")
@@ -91,10 +169,42 @@ class QueueTests(unittest.TestCase):
         review_queue.reset_entry(self.state_path, item["key"])
         self.assertEqual(review_queue.claim_candidate(self.config, self.state_path), item)
 
-    def test_state_is_valid_json_after_atomic_write(self) -> None:
-        state = {"version": 1, "entries": {"one": {"status": "completed"}}}
-        review_queue.write_state(self.state_path, state)
-        self.assertEqual(json.loads(self.state_path.read_text()), state)
+        connection = review_queue.connect_state(self.state_path)
+        reset_event = connection.execute(
+            "SELECT payload_json FROM events WHERE event_type = 'review_reset'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual(json.loads(reset_event["payload_json"])["claim_key"], item["key"])
+
+    @patch.object(review_queue, "candidates")
+    def test_heartbeat_refreshes_active_lease(self, candidates_mock) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+
+        result = review_queue.heartbeat_review(self.state_path, item["key"])
+
+        self.assertEqual(result["status"], "claimed")
+        connection = review_queue.connect_state(self.state_path)
+        row = connection.execute(
+            "SELECT claimed_at FROM review_rounds WHERE claim_key = ?", (item["key"],)
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row["claimed_at"], result["refreshed_at"])
+
+    def test_state_database_has_expected_schema(self) -> None:
+        connection = review_queue.connect_state(self.state_path)
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        connection.close()
+        self.assertTrue(
+            {"pull_requests", "review_rounds", "findings", "github_reviews"}
+            <= tables
+        )
 
     def test_example_project_id_must_be_replaced(self) -> None:
         config_path = Path(self.temporary.name) / "config.json"
@@ -128,13 +238,13 @@ class QueueTests(unittest.TestCase):
             [item["key"] for item in result["reserved"]],
             [item["key"] for item in items],
         )
-        state = review_queue.read_state(self.state_path)
-        self.assertEqual(
-            {entry["status"] for entry in state["entries"].values()}, {"claimed"}
-        )
-        self.assertTrue(
-            all("candidate" in entry for entry in state["entries"].values())
-        )
+        connection = review_queue.connect_state(self.state_path)
+        rows = connection.execute(
+            "SELECT status, candidate_json FROM review_rounds"
+        ).fetchall()
+        connection.close()
+        self.assertEqual({row["status"] for row in rows}, {"claimed"})
+        self.assertTrue(all(json.loads(row["candidate_json"]) for row in rows))
 
     @patch.object(review_queue, "candidates")
     def test_dispatch_respects_global_active_review_capacity(
@@ -159,6 +269,59 @@ class QueueTests(unittest.TestCase):
 
         self.assertEqual(first["reserved"][0]["key"], item["key"])
         self.assertEqual(second["reserved"], [])
+
+    @patch.object(review_queue, "candidates")
+    def test_same_head_is_reclaimed_after_a_new_review_request_event(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        first["review_request_event_id"] = "100"
+        first["review_requested_at"] = "2026-09-03T00:00:00Z"
+        first["key"] += "~request-100"
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        review_queue.update_entry(
+            self.state_path,
+            first["key"],
+            "completed",
+            completed_at="2026-09-03T01:00:00Z",
+        )
+
+        second = dict(first)
+        second["review_request_event_id"] = "101"
+        second["review_requested_at"] = "2026-09-03T02:00:00Z"
+        second["key"] = second["key"].replace("request-100", "request-101")
+        candidates_mock.return_value = [second]
+
+        self.assertEqual(
+            review_queue.claim_candidate(self.config, self.state_path), second
+        )
+
+    @patch.object(review_queue, "candidates")
+    def test_dispatch_reuses_bound_task_for_new_round(self, candidates_mock) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.reserve_dispatch_batch(self.config, self.state_path)
+        review_queue.bind_task(
+            self.state_path,
+            first["key"],
+            thread_id="thread-123",
+            host_id="local",
+            client_thread_id=None,
+        )
+        review_queue.update_entry(
+            self.state_path,
+            first["key"],
+            "completed",
+            completed_at="2026-09-03T01:00:00Z",
+        )
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        result = review_queue.reserve_dispatch_batch(self.config, self.state_path)
+
+        self.assertEqual(result["reserved"][0]["dispatch_action"], "continue_task")
+        self.assertEqual(result["reserved"][0]["task_thread_id"], "thread-123")
 
     def test_suggested_task_title_uses_issue_repo_pr_and_local_time(self) -> None:
         item = candidate(number=6675)
@@ -187,10 +350,12 @@ class QueueTests(unittest.TestCase):
         )
 
         self.assertEqual(prepared["checkout_path"], str(destination))
-        self.assertEqual(
-            review_queue.read_state(self.state_path)["entries"][item["key"]]["status"],
-            "reviewing",
-        )
+        connection = review_queue.connect_state(self.state_path)
+        status = connection.execute(
+            "SELECT status FROM review_rounds WHERE claim_key = ?", (item["key"],)
+        ).fetchone()["status"]
+        connection.close()
+        self.assertEqual(status, "reviewing")
 
     def test_worker_rejects_unknown_claim(self) -> None:
         with self.assertRaises(review_queue.QueueError):
@@ -223,6 +388,194 @@ class QueueTests(unittest.TestCase):
             ),
             [],
         )
+
+    @patch.object(review_queue, "candidates")
+    def test_completed_review_stores_structured_findings(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+
+        finding = history["review_rounds"][0]["findings"][0]
+        self.assertEqual(finding["finding_key"], "F-01")
+        self.assertEqual(finding["status"], "proposed")
+        self.assertIn("another owner", finding["failure_example"])
+
+    @patch.object(review_queue, "candidates")
+    def test_binding_task_after_completion_preserves_round_status(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+
+        review_queue.bind_task(
+            self.state_path,
+            item["key"],
+            thread_id="task-123",
+            host_id="local",
+            client_thread_id=None,
+        )
+
+        connection = review_queue.connect_state(self.state_path)
+        row = connection.execute(
+            "SELECT status FROM review_rounds WHERE claim_key = ?", (item["key"],)
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row["status"], "completed")
+
+    @patch.object(review_queue, "candidates")
+    def test_previous_review_context_only_carries_accepted_findings(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note="Worth enforcing",
+        )
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        context = review_queue.previous_review_context(
+            self.state_path, second["key"]
+        )
+
+        self.assertEqual(context["head_sha"], first["head_sha"])
+        self.assertEqual(
+            context["accepted_findings"][0]["finding_key"], "F-01"
+        )
+
+    @patch.object(review_queue, "candidates")
+    def test_preview_review_uses_only_accepted_findings(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+
+        preview = review_queue.preview_review(self.state_path, item["key"], None)
+
+        self.assertEqual(preview["finding_ids"], ["F-01"])
+        self.assertEqual(preview["review"]["commit_id"], item["head_sha"])
+        self.assertEqual(preview["review"]["comments"][0]["line"], 15)
+
+    @patch.object(review_queue, "candidates")
+    def test_preview_rejects_unaccepted_explicit_finding(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+
+        with self.assertRaisesRegex(review_queue.QueueError, "explicitly accepted"):
+            review_queue.preview_review(self.state_path, item["key"], ["F-01"])
+
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews", return_value=[])
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_draft_and_submit_review_are_recorded(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        current_head_mock.return_value = item["head_sha"]
+        run_json_mock.side_effect = [
+            {
+                "id": 700,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            {"id": 700, "state": "PENDING"},
+            {
+                "id": 700,
+                "state": "CHANGES_REQUESTED",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+                "submitted_at": "2026-09-03T04:00:00Z",
+                "body": "Please address this.",
+            },
+            [
+                {
+                    "id": 701,
+                    "path": "app/models/widget.rb",
+                    "body": finding_document()["findings"][0]["review_comment"],
+                }
+            ],
+        ]
+
+        drafted = review_queue.draft_review(
+            self.state_path, item["key"], None, "DRAFT"
+        )
+        submitted = review_queue.request_changes(
+            self.state_path, item["key"], "REQUEST_CHANGES"
+        )
+
+        self.assertEqual(drafted["state"], "PENDING")
+        self.assertEqual(submitted["state"], "CHANGES_REQUESTED")
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+        self.assertEqual(
+            history["review_rounds"][0]["findings"][0]["status"], "submitted"
+        )
+
+    @patch.object(review_queue, "current_pr_head", return_value="c" * 40)
+    @patch.object(review_queue, "candidates")
+    def test_draft_aborts_when_pr_head_changed(
+        self, candidates_mock, _current_head_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+
+        with self.assertRaisesRegex(review_queue.QueueError, "head changed"):
+            review_queue.draft_review(
+                self.state_path, item["key"], None, "DRAFT"
+            )
 
     @patch.object(review_queue, "prepare_checkout")
     @patch.object(review_queue, "pr_details")

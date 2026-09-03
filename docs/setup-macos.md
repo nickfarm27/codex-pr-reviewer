@@ -1,6 +1,6 @@
 # Set up Codex PR Reviewer on macOS
 
-This guide installs the workflow on a Mac and creates a private, report-only dispatcher in the Codex desktop app.
+This guide installs the workflow on a Mac and creates a private, report-only dispatcher in the Codex desktop app. Optional user-triggered skills can later draft and submit change requests.
 
 ## 1. Install the prerequisites
 
@@ -34,7 +34,7 @@ Edit `config.json`:
 - `codex_project_id`: the ID of the local Codex project created in the next step.
 - `local_repositories`: optional `owner/repository` to absolute checkout-path mappings. These reuse local Git objects for faster preparation; they are not the review working copies.
 
-`config.json`, cached checkouts, state, and generated reports stay local and are ignored by Git.
+`config.json`, cached checkouts, the SQLite state database, and generated reports stay local and are ignored by Git.
 
 ## 3. Create the local Codex project
 
@@ -70,21 +70,39 @@ Do not use `dispatch` as a dry run: it reserves work for task creation. After ch
 
 ## 5. What each scheduled run does
 
-The scheduled task is only a dispatcher. It atomically reserves available candidates up to the concurrency limit, creates one independent task per PR, then archives itself. Worker tasks remain visible and each one:
+The scheduled task is only a dispatcher. It atomically reserves available candidates up to the concurrency limit, creates the first task for each PR or continues that PR's already-bound task, then archives itself. Worker tasks remain visible and each one:
 
 1. Prepares an isolated detached checkout at the reserved PR head.
 2. Retrieves bounded Linear context when available.
 3. Reviews the full diff, nearby behavior, tests, and affected contracts without executing PR code.
-4. Writes a private Markdown report under `reports/`.
+4. Writes a private Markdown report and structured findings under `reports/`.
 5. Ends with direct links to the GitHub PR and primary Linear issue.
 
 When no reviews are waiting, the dispatcher archives itself without creating worker tasks.
 
-## 6. Moving to another Mac
+The task binding is keyed by repository and PR number, so later commits and later review requests return to the same task. The SQLite database also carries accepted and submitted finding context into the next round.
 
-Clone the repository and repeat the configuration steps. Do not copy `.cache/`, `.state/`, or `reports/`; they are machine-local. Recreate `config.json` with the new Codex project ID and local checkout paths, then create a new paused scheduled task.
+## 6. Optional GitHub review actions
+
+Automated runs never write to GitHub. In a completed PR task, ask Codex to draft review comments for selected findings. The repo-scoped `draft-pr-review` skill previews the exact payload before it can create a pending GitHub review. Then ask Codex to request changes; the separate `request-pr-changes` skill verifies and submits that pending review.
+
+These actions require the existing `gh` authentication and explicit user requests. They abort if the PR head moved, if the expected pending review is missing, or if GitHub already has an unrelated pending review. The workflow does not approve PRs.
+
+## 7. Moving to another Mac
+
+Clone the repository and repeat the configuration steps. Normally do not copy `.cache/`, `.state/`, or `reports/`; they are machine-local. Recreate `config.json` with the new Codex project ID and local checkout paths, then create a new paused scheduled task. Repo-scoped skills under `.agents/skills/` arrive with the clone.
 
 If the old Mac might still run the dispatcher, pause or delete its scheduled task before activating the new one. Queue state is local, so two active Macs cannot coordinate reservations with each other.
+
+### Migrating an older installation
+
+Run:
+
+```sh
+python3 bin/review_queue.py migrate-state
+```
+
+The command imports legacy `.state/reviews.json` entries into `.state/reviews.db` once. It leaves the JSON file in place as a backup. Existing historical reviews have no task binding or structured findings, so the next requested review for those PRs creates and binds a continuing task unless one is manually seeded.
 
 ## Troubleshooting
 
