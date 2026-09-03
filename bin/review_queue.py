@@ -609,6 +609,14 @@ def candidate_is_available(
     if not prior:
         return True
 
+    request_event_id = candidate.get("review_request_event_id")
+    if (
+        request_event_id
+        and prior["review_request_event_id"]
+        and request_event_id != prior["review_request_event_id"]
+    ):
+        return True
+
     requested_at = candidate.get("review_requested_at")
     completed_at = prior["completed_at"]
     if not requested_at or not completed_at:
@@ -1117,7 +1125,7 @@ def bind_task(
                 review["pull_request_id"],
             ),
         )
-        if review["status"] in ACTIVE_STATUSES:
+        if review["status"] == "claimed":
             connection.execute(
                 """
                 UPDATE review_rounds
@@ -1203,6 +1211,12 @@ def validate_finding(raw: dict[str, Any]) -> dict[str, Any]:
         value = raw.get(line_field)
         if value is not None and (not isinstance(value, int) or value < 1):
             raise QueueError(f"{line_field} for {raw['id']} must be a positive integer")
+    if (
+        raw.get("start_line") is not None
+        and raw.get("end_line") is not None
+        and raw["end_line"] < raw["start_line"]
+    ):
+        raise QueueError(f"end_line for {raw['id']} cannot precede start_line")
     normalized = {name: raw.get(name) for name in required}
     normalized["start_line"] = raw.get("start_line")
     normalized["end_line"] = raw.get("end_line") or raw.get("start_line")
@@ -1244,6 +1258,40 @@ def complete_review(
             raise QueueError(f"Unknown claim key: {key}")
         if review["status"] not in {"reviewing", "preparing", "dispatched", "claimed"}:
             raise QueueError(f"Review cannot be completed from status {review['status']}")
+        disposition_pairs: list[tuple[str, str]] = []
+        for disposition in document["previous_findings"]:
+            if not isinstance(disposition, dict):
+                raise QueueError("Previous finding dispositions must be objects")
+            source_key = disposition.get("claim_key")
+            finding_key = disposition.get("finding_id")
+            if not isinstance(source_key, str) or not isinstance(finding_key, str):
+                raise QueueError(
+                    "Previous finding dispositions require claim_key and finding_id"
+                )
+            disposition_pairs.append((source_key, finding_key))
+        if len(disposition_pairs) != len(set(disposition_pairs)):
+            raise QueueError("Previous finding dispositions must be unique")
+
+        carried_pairs = {
+            (row["claim_key"], row["finding_key"])
+            for row in connection.execute(
+                """
+                SELECT rr.claim_key, f.finding_key FROM findings f
+                JOIN review_rounds rr ON rr.id = f.review_round_id
+                WHERE rr.pull_request_id = ? AND rr.id != ?
+                  AND f.status IN ('accepted', 'drafted', 'submitted', 'still_open')
+                """,
+                (review["pull_request_id"], review["id"]),
+            ).fetchall()
+        }
+        provided_pairs = set(disposition_pairs)
+        if provided_pairs != carried_pairs:
+            missing = sorted(carried_pairs - provided_pairs)
+            unexpected = sorted(provided_pairs - carried_pairs)
+            raise QueueError(
+                "Previous finding dispositions must reconcile every carried finding; "
+                f"missing={missing}, unexpected={unexpected}"
+            )
         timestamp = isoformat()
         for finding in findings:
             connection.execute(
@@ -1275,8 +1323,6 @@ def complete_review(
             )
 
         for disposition in document["previous_findings"]:
-            if not isinstance(disposition, dict):
-                raise QueueError("Previous finding dispositions must be objects")
             status = disposition.get("status")
             if status not in {"resolved", "still_open", "obsolete"}:
                 raise QueueError(f"Invalid previous finding status: {status}")
@@ -1447,7 +1493,9 @@ def selected_findings(
             raise QueueError(f"Unknown findings for this review: {sorted(missing)}")
         selected = [available[key] for key in finding_keys]
     else:
-        selected = [row for row in rows if row["status"] == "accepted"]
+        selected = [
+            row for row in rows if row["status"] in {"accepted", "drafted"}
+        ]
     if not selected:
         raise QueueError("No accepted findings selected for the PR review")
     unaccepted = [
@@ -1652,6 +1700,7 @@ def draft_review(
     if current_pr_head(preview["url"]) != preview["head_sha"]:
         raise QueueError("PR head changed after review; re-review before drafting comments")
 
+    existing_review: dict[str, Any] | None = None
     connection = connect_state(state_path)
     try:
         review, _ = get_round(connection, key)
@@ -1664,19 +1713,36 @@ def draft_review(
             (review["id"],),
         ).fetchone()
         if existing and existing["payload_hash"] == preview["payload_hash"]:
-            return {
-                "github_review_id": existing["github_review_id"],
-                "state": "PENDING",
-                "html_url": existing["html_url"],
-                "finding_ids": preview["finding_ids"],
-                "idempotent": True,
-            }
+            existing_review = dict(existing)
         if existing:
-            raise QueueError(
-                "This review round already has a different pending GitHub review"
-            )
+            if existing_review is None:
+                raise QueueError(
+                    "This review round already has a different pending GitHub review"
+                )
     finally:
         connection.close()
+
+    if existing_review:
+        remote = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{preview['repository']}/pulls/{preview['number']}"
+                f"/reviews/{existing_review['github_review_id']}",
+            ]
+        )
+        if remote.get("state") != "PENDING":
+            raise QueueError(
+                "The locally recorded draft is no longer pending on GitHub: "
+                f"{remote.get('state')}"
+            )
+        return {
+            "github_review_id": existing_review["github_review_id"],
+            "state": "PENDING",
+            "html_url": existing_review["html_url"],
+            "finding_ids": preview["finding_ids"],
+            "idempotent": True,
+        }
 
     pending = remote_pending_reviews(preview["repository"], preview["number"])
     if pending:
@@ -1786,7 +1852,7 @@ def request_changes(
                 submitted_at = ?, updated_at = ? WHERE id = ?
             """,
             (
-                response.get("body"),
+                response.get("body") or draft["body"],
                 response.get("html_url") or draft["html_url"],
                 response.get("submitted_at") or timestamp,
                 timestamp,
@@ -1894,7 +1960,12 @@ def report_path(candidate: dict[str, Any]) -> Path:
     date = now().date().isoformat()
     repo = candidate["repository"].replace("/", "--")
     short_sha = candidate["head_sha"][:12]
-    return ROOT / "reports" / date / f"{repo}--pr-{candidate['number']}--{short_sha}.md"
+    request_id = candidate.get("review_request_event_id")
+    request_suffix = f"--request-{request_id}" if request_id else ""
+    filename = (
+        f"{repo}--pr-{candidate['number']}--{short_sha}{request_suffix}.md"
+    )
+    return ROOT / "reports" / date / filename
 
 
 def command_doctor(config: dict[str, Any], state_path: Path) -> None:

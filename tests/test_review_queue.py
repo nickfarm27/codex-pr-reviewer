@@ -298,6 +298,32 @@ class QueueTests(unittest.TestCase):
         )
 
     @patch.object(review_queue, "candidates")
+    def test_new_review_request_id_wins_over_timestamp_precision(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        first["review_request_event_id"] = "100"
+        first["review_requested_at"] = "2026-09-03T01:00:00Z"
+        first["key"] += "~request-100"
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        review_queue.update_entry(
+            self.state_path,
+            first["key"],
+            "completed",
+            completed_at="2026-09-03T01:00:00.900000Z",
+        )
+
+        second = dict(first)
+        second["review_request_event_id"] = "101"
+        second["key"] = second["key"].replace("request-100", "request-101")
+        candidates_mock.return_value = [second]
+
+        self.assertEqual(
+            review_queue.claim_candidate(self.config, self.state_path), second
+        )
+
+    @patch.object(review_queue, "candidates")
     def test_dispatch_reuses_bound_task_for_new_round(self, candidates_mock) -> None:
         first = candidate()
         candidates_mock.return_value = [first]
@@ -333,6 +359,17 @@ class QueueTests(unittest.TestCase):
             review_queue.suggested_task_title(item, moment),
             "PC-10042 · widgets#6675 · Sep 03 17:05",
         )
+
+    def test_same_head_rereviews_get_distinct_report_paths(self) -> None:
+        first = candidate()
+        first["review_request_event_id"] = "100"
+        second = dict(first)
+        second["review_request_event_id"] = "101"
+
+        self.assertNotEqual(
+            review_queue.report_path(first), review_queue.report_path(second)
+        )
+        self.assertIn("request-100", review_queue.report_path(first).name)
 
     @patch.object(review_queue, "prepare_checkout")
     @patch.object(review_queue, "candidates")
@@ -432,6 +469,30 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(row["status"], "completed")
 
     @patch.object(review_queue, "candidates")
+    def test_binding_task_does_not_move_reviewing_round_backwards(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        review_queue.update_entry(self.state_path, item["key"], "reviewing")
+
+        review_queue.bind_task(
+            self.state_path,
+            item["key"],
+            thread_id="task-123",
+            host_id="local",
+            client_thread_id=None,
+        )
+
+        connection = review_queue.connect_state(self.state_path)
+        row = connection.execute(
+            "SELECT status FROM review_rounds WHERE claim_key = ?", (item["key"],)
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row["status"], "reviewing")
+
+    @patch.object(review_queue, "candidates")
     def test_previous_review_context_only_carries_accepted_findings(
         self, candidates_mock
     ) -> None:
@@ -458,6 +519,43 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(
             context["accepted_findings"][0]["finding_key"], "F-01"
         )
+
+    @patch.object(review_queue, "candidates")
+    def test_rereview_requires_a_disposition_for_every_carried_finding(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "rereview.md"
+        findings = Path(self.temporary.name) / "rereview.findings.json"
+        report.write_text("# Re-review\n")
+        findings.write_text(json.dumps({"findings": [], "previous_findings": []}))
+
+        with self.assertRaisesRegex(review_queue.QueueError, "reconcile every"):
+            review_queue.complete_review(
+                self.state_path, second["key"], report, findings
+            )
+
+    def test_finding_line_range_cannot_run_backwards(self) -> None:
+        finding = finding_document()["findings"][0]
+        finding["start_line"] = 15
+        finding["end_line"] = 12
+
+        with self.assertRaisesRegex(review_queue.QueueError, "cannot precede"):
+            review_queue.validate_finding(finding)
 
     @patch.object(review_queue, "candidates")
     def test_preview_review_uses_only_accepted_findings(
@@ -554,6 +652,46 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(
             history["review_rounds"][0]["findings"][0]["status"], "submitted"
         )
+
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews", return_value=[])
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_idempotent_draft_rechecks_remote_pending_state(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        current_head_mock.return_value = item["head_sha"]
+        run_json_mock.side_effect = [
+            {
+                "id": 700,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            {"id": 700, "state": "PENDING"},
+        ]
+
+        review_queue.draft_review(self.state_path, item["key"], None, "DRAFT")
+        repeated = review_queue.draft_review(
+            self.state_path, item["key"], None, "DRAFT"
+        )
+
+        self.assertTrue(repeated["idempotent"])
+        self.assertEqual(run_json_mock.call_count, 2)
 
     @patch.object(review_queue, "current_pr_head", return_value="c" * 40)
     @patch.object(review_queue, "candidates")
