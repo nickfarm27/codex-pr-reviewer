@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config.json"
 DEFAULT_STATE = ROOT / ".state" / "reviews.db"
 LEGACY_STATE = ROOT / ".state" / "reviews.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_PR_BODY_CHARS = 12_000
 ACTIVE_STATUSES = {"claimed", "dispatched", "preparing", "reviewing"}
 FINDING_STATUSES = {
@@ -33,6 +33,7 @@ FINDING_STATUSES = {
     "still_open",
     "obsolete",
 }
+USER_FINDING_KINDS = {"defect", "required_change", "question", "suggestion"}
 LINEAR_ISSUE_PATTERN = re.compile(
     r"(?<![A-Z0-9])([A-Z][A-Z0-9]{1,9}-\d+)(?![A-Z0-9]|\.\d)",
     re.IGNORECASE,
@@ -349,6 +350,10 @@ def connect_state(path: Path, *, import_legacy: bool = True) -> sqlite3.Connecti
             safeguard_kind TEXT NOT NULL,
             review_comment TEXT NOT NULL,
             fingerprint TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'agent',
+            kind TEXT NOT NULL DEFAULT 'defect',
+            added_after_completion INTEGER NOT NULL DEFAULT 0,
+            source_note TEXT,
             status TEXT NOT NULL DEFAULT 'proposed',
             decision_note TEXT,
             created_at TEXT NOT NULL,
@@ -407,9 +412,46 @@ def connect_state(path: Path, *, import_legacy: bool = True) -> sqlite3.Connecti
             f"State database schema {version_row['value']} is newer than supported "
             f"schema {SCHEMA_VERSION}"
         )
+    elif int(version_row["value"]) < SCHEMA_VERSION:
+        migrate_schema(connection, int(version_row["value"]))
     if import_legacy and path.resolve() == DEFAULT_STATE.resolve():
         migrate_legacy_state(connection, LEGACY_STATE)
     return connection
+
+
+def migrate_schema(connection: sqlite3.Connection, version: int) -> None:
+    """Upgrade an existing state database without discarding review history."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        if version == 1:
+            existing_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(findings)").fetchall()
+            }
+            additions = {
+                "source": "TEXT NOT NULL DEFAULT 'agent'",
+                "kind": "TEXT NOT NULL DEFAULT 'defect'",
+                "added_after_completion": "INTEGER NOT NULL DEFAULT 0",
+                "source_note": "TEXT",
+            }
+            for name, declaration in additions.items():
+                if name not in existing_columns:
+                    connection.execute(
+                        f"ALTER TABLE findings ADD COLUMN {name} {declaration}"
+                    )
+            version = 2
+        if version != SCHEMA_VERSION:
+            raise QueueError(
+                f"No migration path from schema {version} to {SCHEMA_VERSION}"
+            )
+        connection.execute(
+            "UPDATE metadata SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def record_event(
@@ -819,7 +861,9 @@ def previous_review_context(state_path: Path, key: str) -> dict[str, Any] | None
                 SELECT rr.claim_key, f.finding_key, f.severity, f.title, f.path,
                        f.start_line, f.end_line, f.explanation,
                        f.failure_example, f.safeguard, f.safeguard_kind,
-                       f.review_comment, f.status, f.decision_note
+                       f.review_comment, f.source, f.kind,
+                       f.added_after_completion, f.source_note,
+                       f.status, f.decision_note
                 FROM findings f
                 JOIN review_rounds rr ON rr.id = f.review_round_id
                 WHERE rr.pull_request_id = ? AND rr.id != ?
@@ -1178,7 +1222,7 @@ def load_findings_document(path: Path) -> dict[str, Any]:
     return {"findings": findings, "previous_findings": dispositions}
 
 
-def validate_finding(raw: dict[str, Any]) -> dict[str, Any]:
+def validate_finding(raw: dict[str, Any], *, id_prefix: str = "F") -> dict[str, Any]:
     required = {
         "id",
         "severity",
@@ -1197,7 +1241,7 @@ def validate_finding(raw: dict[str, Any]) -> dict[str, Any]:
         raise QueueError(
             f"Finding is missing required fields: {sorted(missing)}"
         )
-    if not re.fullmatch(r"F-\d{2}", str(raw["id"])):
+    if not re.fullmatch(rf"{re.escape(id_prefix)}-\d{{2}}", str(raw["id"])):
         raise QueueError(f"Invalid finding ID: {raw['id']}")
     if raw["severity"] not in {"P0", "P1", "P2", "P3"}:
         raise QueueError(f"Invalid severity for {raw['id']}: {raw['severity']}")
@@ -1300,8 +1344,10 @@ def complete_review(
                     review_round_id, finding_key, severity, title, path,
                     start_line, end_line, explanation, failure_example,
                     safeguard, safeguard_kind, review_comment, fingerprint,
-                    status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)
+                    source, kind, added_after_completion, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          'agent', 'defect', 0, 'proposed', ?, ?)
                 """,
                 (
                     review["id"],
@@ -1406,6 +1452,179 @@ def get_round(
     ).fetchone()
     assert pull_request is not None
     return review, pull_request
+
+
+def load_user_finding(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise QueueError(f"User finding file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise QueueError(f"Invalid user finding JSON in {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise QueueError("User finding document must be an object")
+    return raw
+
+
+def add_user_finding(
+    state_path: Path,
+    key: str,
+    finding_document: Path,
+    *,
+    accept: bool,
+) -> dict[str, Any]:
+    """Append verified user feedback to a completed review round."""
+    raw = load_user_finding(finding_document)
+    kind = raw.get("kind", "required_change")
+    if kind not in USER_FINDING_KINDS:
+        raise QueueError(
+            f"Invalid user finding kind: {kind}; choose from "
+            f"{sorted(USER_FINDING_KINDS)}"
+        )
+    source_note = raw.get("source_note")
+    if source_note is not None and (
+        not isinstance(source_note, str) or not source_note.strip()
+    ):
+        raise QueueError("source_note must be non-empty text when provided")
+
+    connection = connect_state(state_path)
+    try:
+        review, pull_request = get_round(connection, key)
+        if review["status"] != "completed":
+            raise QueueError("User feedback can only be added to a completed review")
+        expected_round_id = review["id"]
+        expected_head = review["head_sha"]
+        pr_url = pull_request["url"]
+    finally:
+        connection.close()
+
+    if current_pr_head(pr_url) != expected_head:
+        raise QueueError(
+            "PR head changed after this review; verify the feedback against a "
+            "completed round for the current head before adding it"
+        )
+
+    connection = connect_state(state_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        review, pull_request = get_round(connection, key)
+        if review["id"] != expected_round_id or review["head_sha"] != expected_head:
+            raise QueueError("Review round changed while adding user feedback")
+        if review["status"] != "completed":
+            raise QueueError("User feedback can only be added to a completed review")
+
+        existing_keys = {
+            row["finding_key"]
+            for row in connection.execute(
+                "SELECT finding_key FROM findings WHERE review_round_id = ?",
+                (review["id"],),
+            ).fetchall()
+        }
+        sequence = 1
+        while f"U-{sequence:02d}" in existing_keys:
+            sequence += 1
+        candidate = dict(raw)
+        candidate["id"] = f"U-{sequence:02d}"
+        candidate.pop("kind", None)
+        candidate.pop("source_note", None)
+        finding = validate_finding(candidate, id_prefix="U")
+
+        duplicate = connection.execute(
+            """
+            SELECT * FROM findings
+            WHERE review_round_id = ? AND fingerprint = ?
+            ORDER BY id LIMIT 1
+            """,
+            (review["id"], finding["fingerprint"]),
+        ).fetchone()
+        timestamp = isoformat()
+        if duplicate is not None:
+            accepted_now = False
+            if accept and duplicate["status"] == "proposed":
+                connection.execute(
+                    "UPDATE findings SET status = 'accepted', updated_at = ? WHERE id = ?",
+                    (timestamp, duplicate["id"]),
+                )
+                accepted_now = True
+            record_event(
+                connection,
+                "user_finding_deduplicated",
+                pull_request_id=pull_request["id"],
+                review_round_id=review["id"],
+                payload={
+                    "finding_id": duplicate["finding_key"],
+                    "requested_kind": kind,
+                    "accepted": accepted_now,
+                },
+            )
+            connection.commit()
+            return {
+                "claim_key": key,
+                "finding_id": duplicate["finding_key"],
+                "source": duplicate["source"],
+                "kind": duplicate["kind"],
+                "status": "accepted" if accepted_now else duplicate["status"],
+                "deduplicated": True,
+            }
+
+        status = "accepted" if accept else "proposed"
+        connection.execute(
+            """
+            INSERT INTO findings(
+                review_round_id, finding_key, severity, title, path,
+                start_line, end_line, explanation, failure_example,
+                safeguard, safeguard_kind, review_comment, fingerprint,
+                source, kind, added_after_completion, source_note, status,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      'user', ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                review["id"],
+                finding["id"],
+                finding["severity"],
+                finding["title"],
+                finding["path"],
+                finding["start_line"],
+                finding["end_line"],
+                finding["explanation"],
+                finding["failure_example"],
+                finding["safeguard"],
+                finding["safeguard_kind"],
+                finding["review_comment"],
+                finding["fingerprint"],
+                kind,
+                source_note.strip() if source_note else None,
+                status,
+                timestamp,
+                timestamp,
+            ),
+        )
+        record_event(
+            connection,
+            "user_finding_added",
+            pull_request_id=pull_request["id"],
+            review_round_id=review["id"],
+            payload={
+                "finding_id": finding["id"],
+                "kind": kind,
+                "accepted": accept,
+            },
+        )
+        connection.commit()
+        return {
+            "claim_key": key,
+            "finding_id": finding["id"],
+            "source": "user",
+            "kind": kind,
+            "status": status,
+            "deduplicated": False,
+        }
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def decide_findings(
@@ -1516,8 +1735,8 @@ def build_review_payload(
 ) -> tuple[dict[str, Any], str]:
     body = (
         f"Review of `{review['head_sha'][:12]}`. "
-        f"I found {len(findings)} concrete issue"
-        f"{'s' if len(findings) != 1 else ''} worth addressing before merge."
+        f"This review includes {len(findings)} item"
+        f"{'s' if len(findings) != 1 else ''} to address before merge."
     )
     comments: list[dict[str, Any]] = []
     body_only: list[str] = []
@@ -1566,6 +1785,15 @@ def preview_review(
             "url": pull_request["url"],
             "head_sha": review["head_sha"],
             "finding_ids": [row["finding_key"] for row in findings],
+            "findings": [
+                {
+                    "id": row["finding_key"],
+                    "title": row["title"],
+                    "source": row["source"],
+                    "kind": row["kind"],
+                }
+                for row in findings
+            ],
             "payload_hash": payload_hash,
             "review": payload,
         }
@@ -1925,7 +2153,8 @@ def review_history(
                     """
                     SELECT finding_key, severity, title, path, start_line, end_line,
                            status, decision_note, failure_example, safeguard,
-                           safeguard_kind, review_comment
+                           safeguard_kind, review_comment, source, kind,
+                           added_after_completion, source_note
                     FROM findings WHERE review_round_id = ? ORDER BY id
                     """,
                     (review["id"],),
@@ -2036,6 +2265,11 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--reject", nargs="*", default=[])
     decide.add_argument("--note")
 
+    add_user = subparsers.add_parser("add-user-finding")
+    add_user.add_argument("--key", required=True)
+    add_user.add_argument("--finding", required=True, type=Path)
+    add_user.add_argument("--accept", action="store_true")
+
     preview = subparsers.add_parser("preview-review")
     preview.add_argument("--key", required=True)
     preview.add_argument("--findings", nargs="*")
@@ -2132,6 +2366,14 @@ def main() -> int:
                 note=args.note,
             )
             print(json.dumps({"status": "decided", **result}, indent=2))
+        elif args.command == "add-user-finding":
+            result = add_user_finding(
+                args.state,
+                args.key,
+                args.finding.resolve(),
+                accept=args.accept,
+            )
+            print(json.dumps({"status": "user-finding-added", **result}, indent=2))
         elif args.command == "preview-review":
             result = preview_review(args.state, args.key, args.findings)
             print(json.dumps({"status": "preview", **result}, indent=2))

@@ -37,7 +37,7 @@ Before running `doctor`, replace `codex_project_id` in `config.json`. The simple
 6. Codex reviews the full diff, first-order callers and callees, relevant tests, and affected contracts using `AGENTS.md` and `prompts/review.md`.
 7. Each worker is named `ISSUE-ID · repository#PR · MMM DD HH:mm` for quick identification.
 8. A compact briefing, structured findings, and review are saved under `reports/` and surfaced with direct PR and Linear links.
-9. Accepted findings and submitted reviews are carried into later review requests, including same-commit re-requests.
+9. Accepted automated findings and user-raised review addenda are carried into later review requests, including same-commit re-requests.
 
 ```text
 Scheduled dispatcher
@@ -64,6 +64,7 @@ python3 bin/review_queue.py claim --prepare
 python3 bin/review_queue.py complete --key 'OWNER/REPO#NUMBER@SHA' --report '/absolute/path/to/report.md' --findings '/absolute/path/to/findings.json'
 python3 bin/review_queue.py history --repository 'OWNER/REPO' --number NUMBER
 python3 bin/review_queue.py decide --key 'OWNER/REPO#NUMBER@SHA' --accept F-01
+python3 bin/review_queue.py add-user-finding --key 'OWNER/REPO#NUMBER@SHA' --finding '/absolute/path/to/user-finding.json' --accept
 python3 bin/review_queue.py preview-review --key 'OWNER/REPO#NUMBER@SHA'
 python3 bin/review_queue.py draft-review --key 'OWNER/REPO#NUMBER@SHA' --confirm DRAFT
 python3 bin/review_queue.py request-changes --key 'OWNER/REPO#NUMBER@SHA' --confirm REQUEST_CHANGES
@@ -84,10 +85,12 @@ Review-request event IDs are part of the round identity when GitHub provides the
 
 The repo includes two discoverable Codex skills under `.agents/skills/`:
 
-- `draft-pr-review` records which findings you accepted, previews the exact review payload, and can create a pending GitHub review after an explicit request.
+- `draft-pr-review` records accepted automated findings or verified feedback you raise later, previews the exact review payload, and creates a pending GitHub review when explicitly requested.
 - `request-pr-changes` verifies that recorded pending review and submits it as `REQUEST_CHANGES` after a separate explicit request.
 
-Keeping these as separate actions gives you a final inspection point before anything becomes visible to the author. Both commands recheck the PR head, use idempotency safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings so it can mark each one resolved, still open, or obsolete.
+If you notice something after a clean automated review, you do not need to ask GitHub for another review. Ask the continuing PR task to draft your concern. It verifies the concern against the exact current head, appends it to SQLite as `U-01`, `U-02`, and so on with `source: user`, and leaves the original report unchanged. User items can be requirements, questions, suggestions, or defects; they are described faithfully instead of being forced through the autonomous defect gate. Asking to draft your own item also accepts it, so there is no redundant confirmation step.
+
+Drafting and submitting remain separate actions, giving you a final inspection point before anything becomes visible to the author. The commands recheck the PR head, use idempotency and pending-review collision safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings—including user addenda—so it can mark each one resolved, still open, or obsolete.
 
 The SQLite database is the source of truth for dispatch, task bindings, review rounds, finding decisions, and GitHub review state. `history` provides a readable JSON view for the agent and for troubleshooting. Existing `.state/reviews.json` data from older versions is imported once and retained as a backup.
 

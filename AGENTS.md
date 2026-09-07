@@ -25,6 +25,7 @@ Use this final gate before raising any finding: **introduced here, reachable, co
 - Clearly separate code findings, merge/CI readiness, and review limitations. A red unrelated check is not a code finding; a clean review is not proof that unexecuted code works.
 - On a new head, verify previous findings and say when an important one is resolved. Do not carry stale findings forward.
 - Treat `.state/reviews.db` as the authoritative lifecycle record. On a re-request, use its prior report, accepted findings, GitHub review state, and task binding instead of reconstructing history from memory alone.
+- Keep the original automated report immutable. Feedback raised later by the user is an append-only finding addendum in SQLite with `source: user`; carry accepted user items into later review rounds just like accepted automated findings.
 
 ## Review radius
 
@@ -46,6 +47,8 @@ Use this final gate before raising any finding: **introduced here, reachable, co
 
 - Automated reviews are report-only. Never post to GitHub, approve a pull request, request changes, push commits, or modify the reviewed repository during dispatch or review generation.
 - GitHub review writes are permitted only after the user explicitly asks in the PR's continuing task and the applicable `draft-pr-review` or `request-pr-changes` skill has been followed. Those skills may create a pending review or submit `REQUEST_CHANGES`; approval remains out of scope.
+- A user may raise a requirement, concern, question, or suggestion after a clean review. Verify it against the exact current head, describe it without overstating the evidence, and use `add-user-finding`; it need not pass the autonomous defect gate or wait for another GitHub review request. Their instruction to include or draft their own item is also its acceptance.
+- Treat an explicit draft instruction as authorization for a pending GitHub review, and an explicit request-changes instruction as authorization to create that pending review if necessary and submit it. Do not add redundant approval steps. Preserve head, line, deduplication, provenance, and pending-review collision safeguards, and never bypass them with direct `gh` writes.
 - A dispatcher may reserve pending candidates, continue the PR's existing local Codex task or create its first task, and archive itself after a successful or idle dispatch. It must not review code.
 - A review worker may prepare and review only its exact assigned claim. It must not claim other work or create more tasks.
 - Keep one continuing Codex task per repository and PR number. Bind new tasks immediately, and send later review rounds to the stored task so discussion and accepted findings stay together.

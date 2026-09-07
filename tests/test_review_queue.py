@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -54,6 +55,22 @@ def finding_document() -> dict:
         ],
         "previous_findings": [],
     }
+
+
+def user_finding_document() -> dict:
+    finding = dict(finding_document()["findings"][0])
+    finding.pop("id")
+    finding.update(
+        {
+            "kind": "required_change",
+            "title": "Allow either configured country to activate",
+            "failure_example": (
+                "A GB-only account cannot activate even though GB is fully configured."
+            ),
+            "source_note": "The user clarified that partial-country activation is required.",
+        }
+    )
+    return finding
 
 
 class QueueTests(unittest.TestCase):
@@ -205,6 +222,61 @@ class QueueTests(unittest.TestCase):
             {"pull_requests", "review_rounds", "findings", "github_reviews"}
             <= tables
         )
+
+    def test_schema_one_database_is_migrated_without_losing_findings(self) -> None:
+        connection = sqlite3.connect(self.state_path)
+        connection.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata(key, value) VALUES('schema_version', '1');
+            CREATE TABLE findings (
+                id INTEGER PRIMARY KEY,
+                review_round_id INTEGER NOT NULL,
+                finding_key TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                title TEXT NOT NULL,
+                path TEXT NOT NULL,
+                start_line INTEGER,
+                end_line INTEGER,
+                explanation TEXT NOT NULL,
+                failure_example TEXT NOT NULL,
+                safeguard TEXT NOT NULL,
+                safeguard_kind TEXT NOT NULL,
+                review_comment TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                decision_note TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(review_round_id, finding_key)
+            );
+            INSERT INTO findings(
+                review_round_id, finding_key, severity, title, path,
+                explanation, failure_example, safeguard, safeguard_kind,
+                review_comment, fingerprint, created_at, updated_at
+            ) VALUES (
+                1, 'F-01', 'P2', 'Existing', 'app/a.rb', 'Why', 'Failure',
+                'Fix', 'implementation', 'Comment', 'fingerprint', 'then', 'then'
+            );
+            """
+        )
+        connection.close()
+
+        migrated = review_queue.connect_state(self.state_path)
+        finding = migrated.execute(
+            "SELECT source, kind, added_after_completion FROM findings"
+        ).fetchone()
+        version = migrated.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()["value"]
+        migrated.close()
+
+        self.assertEqual(version, "2")
+        self.assertEqual(dict(finding), {
+            "source": "agent",
+            "kind": "defect",
+            "added_after_completion": 0,
+        })
 
     def test_example_project_id_must_be_replaced(self) -> None:
         config_path = Path(self.temporary.name) / "config.json"
@@ -590,6 +662,117 @@ class QueueTests(unittest.TestCase):
 
         with self.assertRaisesRegex(review_queue.QueueError, "explicitly accepted"):
             review_queue.preview_review(self.state_path, item["key"], ["F-01"])
+
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_user_finding_can_be_appended_to_a_completed_clean_review(
+        self, candidates_mock, current_head_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "clean-review.md"
+        report.write_text("# Clean review\n\nNo findings.\n")
+        review_queue.complete_review(self.state_path, item["key"], report, None)
+        original_report = report.read_text()
+        user_finding = Path(self.temporary.name) / "user-finding.json"
+        user_finding.write_text(json.dumps(user_finding_document()))
+        current_head_mock.return_value = item["head_sha"]
+
+        added = review_queue.add_user_finding(
+            self.state_path, item["key"], user_finding, accept=True
+        )
+        preview = review_queue.preview_review(self.state_path, item["key"], None)
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+
+        self.assertEqual(added["finding_id"], "U-01")
+        self.assertEqual(added["status"], "accepted")
+        self.assertEqual(report.read_text(), original_report)
+        stored = history["review_rounds"][0]["findings"][0]
+        self.assertEqual(stored["source"], "user")
+        self.assertEqual(stored["kind"], "required_change")
+        self.assertEqual(stored["added_after_completion"], 1)
+        self.assertEqual(preview["finding_ids"], ["U-01"])
+        self.assertEqual(preview["findings"][0]["source"], "user")
+        self.assertIn("1 item to address", preview["review"]["body"])
+
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_repeated_user_finding_is_idempotent(
+        self, candidates_mock, current_head_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "clean-review.md"
+        report.write_text("# Clean review\n")
+        review_queue.complete_review(self.state_path, item["key"], report, None)
+        user_finding = Path(self.temporary.name) / "user-finding.json"
+        user_finding.write_text(json.dumps(user_finding_document()))
+        current_head_mock.return_value = item["head_sha"]
+
+        first = review_queue.add_user_finding(
+            self.state_path, item["key"], user_finding, accept=False
+        )
+        second = review_queue.add_user_finding(
+            self.state_path, item["key"], user_finding, accept=True
+        )
+
+        self.assertEqual(first["finding_id"], "U-01")
+        self.assertEqual(second["finding_id"], "U-01")
+        self.assertTrue(second["deduplicated"])
+        self.assertEqual(second["status"], "accepted")
+
+    @patch.object(review_queue, "current_pr_head", return_value="b" * 40)
+    @patch.object(review_queue, "candidates")
+    def test_user_finding_rejects_a_stale_review_round(
+        self, candidates_mock, _current_head_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "clean-review.md"
+        report.write_text("# Clean review\n")
+        review_queue.complete_review(self.state_path, item["key"], report, None)
+        user_finding = Path(self.temporary.name) / "user-finding.json"
+        user_finding.write_text(json.dumps(user_finding_document()))
+
+        with self.assertRaisesRegex(review_queue.QueueError, "head changed"):
+            review_queue.add_user_finding(
+                self.state_path, item["key"], user_finding, accept=True
+            )
+
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_accepted_user_finding_is_carried_into_the_next_round(
+        self, candidates_mock, current_head_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "clean-review.md"
+        report.write_text("# Clean review\n")
+        review_queue.complete_review(self.state_path, first["key"], report, None)
+        user_finding = Path(self.temporary.name) / "user-finding.json"
+        user_finding.write_text(json.dumps(user_finding_document()))
+        current_head_mock.return_value = first["head_sha"]
+        review_queue.add_user_finding(
+            self.state_path, first["key"], user_finding, accept=True
+        )
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        context = review_queue.previous_review_context(
+            self.state_path, second["key"]
+        )
+
+        carried = context["accepted_findings"][0]
+        self.assertEqual(carried["finding_key"], "U-01")
+        self.assertEqual(carried["source"], "user")
+        self.assertEqual(carried["kind"], "required_change")
 
     @patch.object(review_queue, "run_json")
     @patch.object(review_queue, "remote_pending_reviews", return_value=[])
