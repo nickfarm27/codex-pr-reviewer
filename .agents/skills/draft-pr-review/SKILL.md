@@ -1,6 +1,6 @@
 ---
 name: draft-pr-review
-description: Turn accepted automated findings or verified user-raised feedback into a preview or pending GitHub PR review when the user asks to draft review comments.
+description: Create or revise a pending GitHub PR review from accepted automated findings or verified user-raised feedback when the user asks to draft or edit review comments.
 ---
 
 # Draft PR Review
@@ -63,5 +63,29 @@ Work in the Codex PR Reviewer project and keep the action tied to the current PR
    ```
 
 The commands recheck the PR head, prevent duplicate local drafts and findings, and refuse to collide with another pending review. Do not bypass those safeguards or use `gh` directly. A pending review is not visible to the PR author until submitted.
+
+## Revise an existing draft
+
+When the current round already has a pending review and the user asks to improve, rewrite, shorten, clarify, or otherwise edit one of its comments, inspect the stored draft in `history` and prepare a JSON object containing only the fields that should change. Preserve the user's intended requirement and make the reasoning easy to follow: explain why it matters, show the practical failure, and include concise examples when they make the behavior clearer.
+
+For example:
+
+```json
+{
+  "title": "Treat supported countries as optional, not mandatory",
+  "explanation": "Supported countries describe platform capability, while each retailer may configure only the countries where it operates.",
+  "failure_example": "A GB-only retailer cannot activate because the absent CH account is treated as required.",
+  "safeguard": "Cover GB-only, CH-only, one-ready/one-incomplete, and no-ready-account cases.",
+  "review_comment": "`SUPPORTED_COUNTRY_CODES` describes what Exporto can support, not what every retailer must configure. Because this requires every country to be ready, a usable GB account is blocked by an absent or incomplete CH account, and adding another supported country later would unexpectedly block existing retailers. Could activation require at least one ready account and enable only methods from ready accounts? Please cover GB-only, CH-only, one-ready/one-incomplete, and no-ready-account cases."
+}
+```
+
+Apply it with:
+
+```sh
+python3 bin/review_queue.py edit-draft-review --key 'CLAIM_KEY' --finding U-01 --edit '/absolute/path/to/edit.json' --confirm EDIT
+```
+
+Treat “make the draft better,” “revise the comment,” and similar action requests as authorization to update the existing pending draft. If the user asks only to show or propose revised wording, keep it local. The edit command requires the same reviewed head, a recorded pending review, and an unsubmitted drafted finding; it updates GitHub and SQLite together. It edits wording and finding metadata, not the comment's file or line anchor. If the anchor must move, explain that the pending review must be replaced rather than bypassing the workflow.
 
 Return the selected finding IDs, whether the result is local-only or pending on GitHub, and links to the PR and pending review when available. Never approve or submit the review from this skill.

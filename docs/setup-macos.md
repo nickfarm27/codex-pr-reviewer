@@ -84,7 +84,7 @@ The task binding is keyed by repository and PR number, so later commits and late
 
 ## 6. Optional GitHub review actions
 
-Automated runs never write to GitHub. In a completed PR task, ask Codex to draft review comments for selected findings. You may also raise a new concern or product requirement after a clean review: the repo-scoped `draft-pr-review` skill verifies it on the current head, stores it as an append-only user item without changing the original report, previews the exact payload, and creates a pending GitHub review when requested. No new GitHub review request is needed. Then ask Codex to request changes; the separate `request-pr-changes` skill verifies and submits that pending review.
+Automated runs never write to GitHub. In a completed PR task, ask Codex to draft review comments for selected findings. You may also raise a new concern or product requirement after a clean review: the repo-scoped `draft-pr-review` skill verifies it on the current head, stores it as an append-only user item without changing the original report, previews the exact payload, and creates a pending GitHub review when requested. No new GitHub review request is needed. While the review is pending, ask the same task to revise a comment; the skill updates both GitHub and local history. Then ask Codex to request changes; the separate `request-pr-changes` skill verifies and submits that pending review.
 
 These actions require the existing `gh` authentication and explicit user requests. They abort if the PR head moved, if the expected pending review is missing, or if GitHub already has an unrelated pending review. The workflow does not approve PRs.
 

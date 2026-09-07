@@ -67,6 +67,7 @@ python3 bin/review_queue.py decide --key 'OWNER/REPO#NUMBER@SHA' --accept F-01
 python3 bin/review_queue.py add-user-finding --key 'OWNER/REPO#NUMBER@SHA' --finding '/absolute/path/to/user-finding.json' --accept
 python3 bin/review_queue.py preview-review --key 'OWNER/REPO#NUMBER@SHA'
 python3 bin/review_queue.py draft-review --key 'OWNER/REPO#NUMBER@SHA' --confirm DRAFT
+python3 bin/review_queue.py edit-draft-review --key 'OWNER/REPO#NUMBER@SHA' --finding U-01 --edit '/absolute/path/to/edit.json' --confirm EDIT
 python3 bin/review_queue.py request-changes --key 'OWNER/REPO#NUMBER@SHA' --confirm REQUEST_CHANGES
 python3 bin/review_queue.py fail --key 'OWNER/REPO#NUMBER@SHA' --reason 'concise reason'
 python3 bin/review_queue.py reset --key 'OWNER/REPO#NUMBER@SHA'
@@ -90,7 +91,7 @@ The repo includes two discoverable Codex skills under `.agents/skills/`:
 
 If you notice something after a clean automated review, you do not need to ask GitHub for another review. Ask the continuing PR task to draft your concern. It verifies the concern against the exact current head, appends it to SQLite as `U-01`, `U-02`, and so on with `source: user`, and leaves the original report unchanged. User items can be requirements, questions, suggestions, or defects; they are described faithfully instead of being forced through the autonomous defect gate. Asking to draft your own item also accepts it, so there is no redundant confirmation step.
 
-Drafting and submitting remain separate actions, giving you a final inspection point before anything becomes visible to the author. The commands recheck the PR head, use idempotency and pending-review collision safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings—including user addenda—so it can mark each one resolved, still open, or obsolete.
+Drafting and submitting remain separate actions, giving you a final inspection point before anything becomes visible to the author. While a review is pending, ask the PR task to improve or revise a comment and it will update the GitHub draft and the stored finding together. Draft edits can change the wording, explanation, examples, safeguard, severity, title, and item kind; moving the file or line anchor requires replacing the draft. The commands recheck the PR head, use idempotency and pending-review collision safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings—including user addenda—so it can mark each one resolved, still open, or obsolete.
 
 The SQLite database is the source of truth for dispatch, task bindings, review rounds, finding decisions, and GitHub review state. `history` provides a readable JSON view for the agent and for troubleshooting. Existing `.state/reviews.json` data from older versions is imported once and retained as a backup.
 

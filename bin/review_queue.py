@@ -34,6 +34,17 @@ FINDING_STATUSES = {
     "obsolete",
 }
 USER_FINDING_KINDS = {"defect", "required_change", "question", "suggestion"}
+EDITABLE_FINDING_FIELDS = {
+    "severity",
+    "title",
+    "explanation",
+    "failure_example",
+    "safeguard",
+    "safeguard_kind",
+    "review_comment",
+    "kind",
+    "source_note",
+}
 LINEAR_ISSUE_PATTERN = re.compile(
     r"(?<![A-Z0-9])([A-Z][A-Z0-9]{1,9}-\d+)(?![A-Z0-9]|\.\d)",
     re.IGNORECASE,
@@ -1466,6 +1477,23 @@ def load_user_finding(path: Path) -> dict[str, Any]:
     return raw
 
 
+def load_finding_edit(path: Path) -> dict[str, Any]:
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError as exc:
+        raise QueueError(f"Finding edit file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise QueueError(f"Invalid finding edit JSON in {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise QueueError("Finding edit document must be an object")
+    unknown = set(raw) - EDITABLE_FINDING_FIELDS - {"id"}
+    if unknown:
+        raise QueueError(f"Finding edit contains unsupported fields: {sorted(unknown)}")
+    if not (set(raw) & EDITABLE_FINDING_FIELDS):
+        raise QueueError("Finding edit must change at least one editable field")
+    return raw
+
+
 def add_user_finding(
     state_path: Path,
     key: str,
@@ -1731,7 +1759,7 @@ def selected_findings(
 
 def build_review_payload(
     review: sqlite3.Row,
-    findings: list[sqlite3.Row],
+    findings: list[sqlite3.Row | dict[str, Any]],
 ) -> tuple[dict[str, Any], str]:
     body = (
         f"Review of `{review['head_sha'][:12]}`. "
@@ -1999,6 +2027,343 @@ def draft_review(
     )
 
 
+def match_remote_review_comment(
+    local_comment: dict[str, Any],
+    remote_comments: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Match a stored inline item to its GitHub review comment."""
+    comment_id = local_comment.get("github_comment_id")
+    if comment_id is not None:
+        matches = [item for item in remote_comments if item.get("id") == comment_id]
+        return matches[0] if len(matches) == 1 else None
+
+    candidates = [
+        item
+        for item in remote_comments
+        if item.get("path") == local_comment.get("path")
+    ]
+    line = local_comment.get("line")
+    if line is not None:
+        line_matches = [
+            item
+            for item in candidates
+            if line in {item.get("line"), item.get("original_line")}
+        ]
+        if len(line_matches) == 1:
+            return line_matches[0]
+        if line_matches:
+            candidates = line_matches
+    body_matches = [
+        item for item in candidates if item.get("body") == local_comment.get("body")
+    ]
+    if len(body_matches) == 1:
+        return body_matches[0]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def edit_draft_review(
+    state_path: Path,
+    key: str,
+    finding_key: str,
+    edit_document: Path,
+    confirmation: str,
+) -> dict[str, Any]:
+    if confirmation != "EDIT":
+        raise QueueError("Editing a GitHub draft requires --confirm EDIT")
+    changes = load_finding_edit(edit_document)
+
+    connection = connect_state(state_path)
+    try:
+        review, pull_request = get_round(connection, key)
+        if review["status"] != "completed":
+            raise QueueError("Only a completed review can have its draft edited")
+        draft = connection.execute(
+            """
+            SELECT * FROM github_reviews
+            WHERE review_round_id = ? AND state = 'PENDING'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (review["id"],),
+        ).fetchone()
+        if draft is None:
+            raise QueueError("No recorded pending GitHub review exists for this round")
+        finding = connection.execute(
+            """
+            SELECT * FROM findings
+            WHERE review_round_id = ? AND finding_key = ?
+            """,
+            (review["id"], finding_key),
+        ).fetchone()
+        if finding is None:
+            raise QueueError(f"Unknown finding for this review: {finding_key}")
+        if finding["status"] != "drafted":
+            raise QueueError(f"Finding is not part of the pending draft: {finding_key}")
+        if changes.get("id") not in {None, finding_key}:
+            raise QueueError(
+                f"Finding edit ID {changes['id']} does not match {finding_key}"
+            )
+
+        merged = {
+            "id": finding["finding_key"],
+            "severity": finding["severity"],
+            "title": finding["title"],
+            "path": finding["path"],
+            "start_line": finding["start_line"],
+            "end_line": finding["end_line"],
+            "explanation": finding["explanation"],
+            "failure_example": finding["failure_example"],
+            "safeguard": finding["safeguard"],
+            "safeguard_kind": finding["safeguard_kind"],
+            "review_comment": finding["review_comment"],
+        }
+        merged.update(
+            {name: value for name, value in changes.items() if name in merged}
+        )
+        normalized = validate_finding(merged, id_prefix=finding_key[0])
+        new_kind = changes.get("kind", finding["kind"])
+        if new_kind not in USER_FINDING_KINDS:
+            raise QueueError(
+                f"Invalid finding kind: {new_kind}; choose from "
+                f"{sorted(USER_FINDING_KINDS)}"
+            )
+        new_source_note = changes.get("source_note", finding["source_note"])
+        if new_source_note is not None and (
+            not isinstance(new_source_note, str) or not new_source_note.strip()
+        ):
+            raise QueueError("source_note must be non-empty text when provided")
+        if isinstance(new_source_note, str):
+            new_source_note = new_source_note.strip()
+
+        local_comments = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM github_review_comments
+                WHERE github_review_id = ? ORDER BY id
+                """,
+                (draft["id"],),
+            ).fetchall()
+        ]
+        local_comment = next(
+            (
+                item
+                for item in local_comments
+                if item["finding_key"] == finding_key
+            ),
+            None,
+        )
+        if local_comment is None:
+            raise QueueError(f"Draft metadata is missing finding: {finding_key}")
+        selected_keys = [item["finding_key"] for item in local_comments]
+        selected_rows = []
+        for selected_key in selected_keys:
+            row = connection.execute(
+                """
+                SELECT * FROM findings
+                WHERE review_round_id = ? AND finding_key = ?
+                """,
+                (review["id"], selected_key),
+            ).fetchone()
+            if row is None:
+                raise QueueError(f"Draft metadata is missing finding: {selected_key}")
+            selected_rows.append(dict(row))
+        old_payload, _ = build_review_payload(review, selected_rows)
+        for row in selected_rows:
+            if row["finding_key"] == finding_key:
+                row.update(normalized)
+                row["finding_key"] = finding_key
+                row["kind"] = new_kind
+                row["source_note"] = new_source_note
+        new_payload, new_payload_hash = build_review_payload(review, selected_rows)
+
+        expected_round_id = review["id"]
+        expected_head = review["head_sha"]
+        expected_draft_id = draft["id"]
+        github_review_id = draft["github_review_id"]
+        repository = pull_request["repository"]
+        number = pull_request["number"]
+        url = pull_request["url"]
+    finally:
+        connection.close()
+
+    if current_pr_head(url) != expected_head:
+        raise QueueError("PR head changed after review; re-review before editing the draft")
+    remote_review = run_json(
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/pulls/{number}/reviews/{github_review_id}",
+        ]
+    )
+    if remote_review.get("state") != "PENDING":
+        raise QueueError(
+            f"Remote GitHub review is not pending: {remote_review.get('state')}"
+        )
+    remote_comments = run_json(
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/pulls/{number}/reviews/"
+            f"{github_review_id}/comments?per_page=100",
+        ]
+    )
+
+    remote_comment = None
+    comment_response = None
+    if local_comment["line"] is not None:
+        remote_comment = match_remote_review_comment(local_comment, remote_comments)
+        if remote_comment is None:
+            raise QueueError(
+                f"Could not uniquely match GitHub comment for {finding_key}"
+            )
+        if remote_comment.get("body") != normalized["review_comment"]:
+            comment_response = run_json(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "PATCH",
+                    f"repos/{repository}/pulls/comments/{remote_comment['id']}",
+                    "--input",
+                    "-",
+                ],
+                input_data={"body": normalized["review_comment"]},
+            )
+
+    summary_changed = old_payload["body"] != new_payload["body"]
+    review_response = None
+    if summary_changed and remote_review.get("body") != new_payload["body"]:
+        review_response = run_json(
+            [
+                "gh",
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repository}/pulls/{number}/reviews/{github_review_id}",
+                "--input",
+                "-",
+            ],
+            input_data={"body": new_payload["body"]},
+        )
+
+    final_review_body = (
+        (review_response or {}).get("body")
+        if summary_changed
+        else remote_review.get("body")
+    ) or new_payload["body"]
+    stored_payload = dict(new_payload)
+    stored_payload["body"] = final_review_body
+    stored_payload_hash = hashlib.sha256(
+        json.dumps(stored_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    changed_fields = sorted(
+        name
+        for name in EDITABLE_FINDING_FIELDS
+        if name in changes and changes[name] != finding[name]
+    )
+
+    connection = connect_state(state_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        review, pull_request = get_round(connection, key)
+        draft = connection.execute(
+            "SELECT * FROM github_reviews WHERE id = ?",
+            (expected_draft_id,),
+        ).fetchone()
+        if (
+            review["id"] != expected_round_id
+            or review["head_sha"] != expected_head
+            or draft is None
+            or draft["state"] != "PENDING"
+            or draft["github_review_id"] != github_review_id
+        ):
+            raise QueueError("Draft state changed while editing the GitHub review")
+        target = connection.execute(
+            """
+            SELECT * FROM findings
+            WHERE review_round_id = ? AND finding_key = ?
+            """,
+            (review["id"], finding_key),
+        ).fetchone()
+        if target is None or target["status"] != "drafted":
+            raise QueueError("Finding state changed while editing the GitHub review")
+        timestamp = isoformat()
+        connection.execute(
+            """
+            UPDATE findings SET severity = ?, title = ?, explanation = ?,
+                failure_example = ?, safeguard = ?, safeguard_kind = ?,
+                review_comment = ?, fingerprint = ?, kind = ?, source_note = ?,
+                updated_at = ? WHERE id = ?
+            """,
+            (
+                normalized["severity"],
+                normalized["title"],
+                normalized["explanation"],
+                normalized["failure_example"],
+                normalized["safeguard"],
+                normalized["safeguard_kind"],
+                normalized["review_comment"],
+                normalized["fingerprint"],
+                new_kind,
+                new_source_note,
+                timestamp,
+                target["id"],
+            ),
+        )
+        github_comment_id = (
+            (comment_response or remote_comment or {}).get("id")
+            if local_comment["line"] is not None
+            else None
+        )
+        connection.execute(
+            """
+            UPDATE github_review_comments SET github_comment_id = ?, body = ?
+            WHERE id = ?
+            """,
+            (
+                github_comment_id,
+                normalized["review_comment"],
+                local_comment["id"],
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE github_reviews SET body = ?, payload_hash = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (final_review_body, stored_payload_hash, timestamp, draft["id"]),
+        )
+        record_event(
+            connection,
+            "github_draft_edited",
+            pull_request_id=pull_request["id"],
+            review_round_id=review["id"],
+            payload={
+                "github_review_id": github_review_id,
+                "finding_id": finding_key,
+                "changed_fields": changed_fields,
+                "payload_hash": new_payload_hash,
+            },
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    response_comment = comment_response or remote_comment or {}
+    return {
+        "github_review_id": github_review_id,
+        "state": "PENDING",
+        "html_url": remote_review.get("html_url") or f"{url}#pullrequestreview-{github_review_id}",
+        "finding_id": finding_key,
+        "changed_fields": changed_fields,
+        "comment_url": response_comment.get("html_url"),
+        "idempotent": not comment_response and not review_response and not changed_fields,
+    }
+
+
 def request_changes(
     state_path: Path, key: str, confirmation: str
 ) -> dict[str, Any]:
@@ -2073,33 +2438,78 @@ def request_changes(
             "SELECT * FROM github_reviews WHERE github_review_id = ?", (review_id,)
         ).fetchone()
         timestamp = isoformat()
+        local_comments = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM github_review_comments
+                WHERE github_review_id = ? ORDER BY id
+                """,
+                (draft["id"],),
+            ).fetchall()
+        ]
+        for local_comment in local_comments:
+            if local_comment["line"] is None:
+                continue
+            remote_comment = match_remote_review_comment(local_comment, comments)
+            if remote_comment is None:
+                continue
+            connection.execute(
+                """
+                UPDATE github_review_comments
+                SET github_comment_id = ?, body = ? WHERE id = ?
+                """,
+                (
+                    remote_comment.get("id"),
+                    remote_comment.get("body") or local_comment["body"],
+                    local_comment["id"],
+                ),
+            )
+            if remote_comment.get("body") and local_comment.get("finding_key"):
+                connection.execute(
+                    """
+                    UPDATE findings SET review_comment = ?, updated_at = ?
+                    WHERE review_round_id = ? AND finding_key = ?
+                    """,
+                    (
+                        remote_comment["body"],
+                        timestamp,
+                        review["id"],
+                        local_comment["finding_key"],
+                    ),
+                )
+        remote_body = response.get("body") or draft["body"]
+        selected_keys = [item["finding_key"] for item in local_comments]
+        selected_rows = [
+            connection.execute(
+                """
+                SELECT * FROM findings
+                WHERE review_round_id = ? AND finding_key = ?
+                """,
+                (review["id"], finding_key),
+            ).fetchone()
+            for finding_key in selected_keys
+        ]
+        submitted_payload, _ = build_review_payload(review, selected_rows)
+        submitted_payload["body"] = remote_body
+        submitted_payload_hash = hashlib.sha256(
+            json.dumps(submitted_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
         connection.execute(
             """
             UPDATE github_reviews SET state = 'CHANGES_REQUESTED',
-                event = 'REQUEST_CHANGES', body = ?, html_url = ?,
+                event = 'REQUEST_CHANGES', body = ?, html_url = ?, payload_hash = ?,
                 submitted_at = ?, updated_at = ? WHERE id = ?
             """,
             (
-                response.get("body") or draft["body"],
+                remote_body,
                 response.get("html_url") or draft["html_url"],
+                submitted_payload_hash,
                 response.get("submitted_at") or timestamp,
                 timestamp,
                 draft["id"],
             ),
         )
-        for comment in comments:
-            connection.execute(
-                """
-                UPDATE github_review_comments SET github_comment_id = ?
-                WHERE github_review_id = ? AND body = ? AND path = ?
-                """,
-                (
-                    comment.get("id"),
-                    draft["id"],
-                    comment.get("body"),
-                    comment.get("path"),
-                ),
-            )
         connection.execute(
             """
             UPDATE findings SET status = 'submitted', updated_at = ?
@@ -2160,17 +2570,30 @@ def review_history(
                     (review["id"],),
                 ).fetchall()
             ]
-            github_reviews = [
-                dict(row)
-                for row in connection.execute(
-                    """
-                    SELECT github_review_id, state, event, commit_sha, html_url,
-                           created_at, submitted_at
-                    FROM github_reviews WHERE review_round_id = ? ORDER BY id
-                    """,
-                    (review["id"],),
-                ).fetchall()
-            ]
+            github_reviews = []
+            for github_review in connection.execute(
+                """
+                SELECT id, github_review_id, state, event, commit_sha, body,
+                       html_url, payload_hash, created_at, submitted_at, updated_at
+                FROM github_reviews WHERE review_round_id = ? ORDER BY id
+                """,
+                (review["id"],),
+            ).fetchall():
+                review_data = dict(github_review)
+                local_review_id = review_data.pop("id")
+                review_data["comments"] = [
+                    dict(row)
+                    for row in connection.execute(
+                        """
+                        SELECT finding_key, github_comment_id, path, line, side,
+                               body, created_at
+                        FROM github_review_comments
+                        WHERE github_review_id = ? ORDER BY id
+                        """,
+                        (local_review_id,),
+                    ).fetchall()
+                ]
+                github_reviews.append(review_data)
             round_data = dict(review)
             round_data.pop("candidate_json", None)
             round_data["findings"] = findings
@@ -2279,6 +2702,12 @@ def build_parser() -> argparse.ArgumentParser:
     draft_review_parser.add_argument("--findings", nargs="*")
     draft_review_parser.add_argument("--confirm", required=True)
 
+    edit_draft = subparsers.add_parser("edit-draft-review")
+    edit_draft.add_argument("--key", required=True)
+    edit_draft.add_argument("--finding", required=True)
+    edit_draft.add_argument("--edit", required=True, type=Path)
+    edit_draft.add_argument("--confirm", required=True)
+
     request_changes_parser = subparsers.add_parser("request-changes")
     request_changes_parser.add_argument("--key", required=True)
     request_changes_parser.add_argument("--confirm", required=True)
@@ -2382,6 +2811,15 @@ def main() -> int:
                 args.state, args.key, args.findings, args.confirm
             )
             print(json.dumps({"status": "drafted", **result}, indent=2))
+        elif args.command == "edit-draft-review":
+            result = edit_draft_review(
+                args.state,
+                args.key,
+                args.finding,
+                args.edit.resolve(),
+                args.confirm,
+            )
+            print(json.dumps({"status": "draft-edited", **result}, indent=2))
         elif args.command == "request-changes":
             result = request_changes(args.state, args.key, args.confirm)
             print(json.dumps({"status": "submitted", **result}, indent=2))

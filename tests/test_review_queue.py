@@ -778,6 +778,238 @@ class QueueTests(unittest.TestCase):
     @patch.object(review_queue, "remote_pending_reviews", return_value=[])
     @patch.object(review_queue, "current_pr_head")
     @patch.object(review_queue, "candidates")
+    def test_pending_inline_review_comment_can_be_edited(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        original_preview = review_queue.preview_review(
+            self.state_path, item["key"], None
+        )
+        original_comment = finding_document()["findings"][0]["review_comment"]
+        revised_comment = (
+            "Ownership identifies the credential boundary, so changing it after "
+            "registration can make retries load another owner's credentials. "
+            "Could we reject owner changes and cover that retry case?"
+        )
+        edit = Path(self.temporary.name) / "edit.json"
+        edit.write_text(
+            json.dumps(
+                {
+                    "explanation": (
+                        "Ownership is the credential boundary used by later retries."
+                    ),
+                    "review_comment": revised_comment,
+                }
+            )
+        )
+        current_head_mock.return_value = item["head_sha"]
+        run_json_mock.side_effect = [
+            {
+                "id": 700,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            {
+                "id": 700,
+                "state": "PENDING",
+                "body": original_preview["review"]["body"],
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            [
+                {
+                    "id": 701,
+                    "path": "app/models/widget.rb",
+                    "line": 15,
+                    "body": original_comment,
+                    "html_url": "https://github.com/acme/widgets/pull/12#discussion-701",
+                }
+            ],
+            {
+                "id": 701,
+                "path": "app/models/widget.rb",
+                "line": 15,
+                "body": revised_comment,
+                "html_url": "https://github.com/acme/widgets/pull/12#discussion-701",
+            },
+        ]
+
+        review_queue.draft_review(self.state_path, item["key"], None, "DRAFT")
+        edited = review_queue.edit_draft_review(
+            self.state_path,
+            item["key"],
+            "F-01",
+            edit,
+            "EDIT",
+        )
+
+        self.assertEqual(edited["state"], "PENDING")
+        self.assertEqual(
+            edited["comment_url"],
+            "https://github.com/acme/widgets/pull/12#discussion-701",
+        )
+        patch_call = run_json_mock.call_args_list[3]
+        self.assertIn("PATCH", patch_call.args[0])
+        self.assertEqual(patch_call.kwargs["input_data"], {"body": revised_comment})
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+        finding = history["review_rounds"][0]["findings"][0]
+        github_review = history["review_rounds"][0]["github_reviews"][0]
+        self.assertEqual(finding["review_comment"], revised_comment)
+        self.assertEqual(github_review["comments"][0]["github_comment_id"], 701)
+        self.assertEqual(github_review["comments"][0]["body"], revised_comment)
+
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews", return_value=[])
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_draft_edit_aborts_when_pr_head_changed(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        current_head_mock.side_effect = [item["head_sha"], "b" * 40]
+        run_json_mock.return_value = {
+            "id": 700,
+            "state": "PENDING",
+            "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+        }
+        review_queue.draft_review(self.state_path, item["key"], None, "DRAFT")
+        edit = Path(self.temporary.name) / "edit.json"
+        edit.write_text(json.dumps({"review_comment": "A clearer explanation."}))
+
+        with self.assertRaisesRegex(review_queue.QueueError, "head changed"):
+            review_queue.edit_draft_review(
+                self.state_path,
+                item["key"],
+                "F-01",
+                edit,
+                "EDIT",
+            )
+
+        self.assertEqual(run_json_mock.call_count, 1)
+
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews", return_value=[])
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_pending_body_only_finding_updates_review_summary(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "review.md"
+        findings_path = Path(self.temporary.name) / "body-only.json"
+        document = finding_document()
+        document["findings"][0].pop("start_line")
+        document["findings"][0].pop("end_line")
+        report.write_text("# Review\n")
+        findings_path.write_text(json.dumps(document))
+        review_queue.complete_review(
+            self.state_path, item["key"], report, findings_path
+        )
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        original_preview = review_queue.preview_review(
+            self.state_path, item["key"], None
+        )
+        edit = Path(self.temporary.name) / "edit-body-only.json"
+        edit.write_text(
+            json.dumps(
+                {
+                    "title": "Clarify the ownership boundary",
+                    "review_comment": "The ownership boundary needs a focused retry test.",
+                }
+            )
+        )
+        current_head_mock.return_value = item["head_sha"]
+        run_json_mock.side_effect = [
+            {
+                "id": 700,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            {
+                "id": 700,
+                "state": "PENDING",
+                "body": original_preview["review"]["body"],
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            [],
+            {
+                "id": 700,
+                "state": "PENDING",
+                "body": (
+                    "Review of `aaaaaaaaaaaa`. This review includes 1 item to "
+                    "address before merge.\n\n### F-01 — Clarify the ownership "
+                    "boundary\n\nThe ownership boundary needs a focused retry test."
+                ),
+            },
+        ]
+
+        review_queue.draft_review(self.state_path, item["key"], None, "DRAFT")
+        edited = review_queue.edit_draft_review(
+            self.state_path,
+            item["key"],
+            "F-01",
+            edit,
+            "EDIT",
+        )
+
+        self.assertEqual(edited["state"], "PENDING")
+        patch_call = run_json_mock.call_args_list[3]
+        self.assertIn(
+            "repos/acme/widgets/pulls/12/reviews/700", patch_call.args[0]
+        )
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+        self.assertIn(
+            "Clarify the ownership boundary",
+            history["review_rounds"][0]["github_reviews"][0]["body"],
+        )
+
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews", return_value=[])
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
     def test_draft_and_submit_review_are_recorded(
         self,
         candidates_mock,
@@ -797,6 +1029,7 @@ class QueueTests(unittest.TestCase):
             note=None,
         )
         current_head_mock.return_value = item["head_sha"]
+        manually_revised_comment = "The reviewer clarified the failure on GitHub."
         run_json_mock.side_effect = [
             {
                 "id": 700,
@@ -815,7 +1048,8 @@ class QueueTests(unittest.TestCase):
                 {
                     "id": 701,
                     "path": "app/models/widget.rb",
-                    "body": finding_document()["findings"][0]["review_comment"],
+                    "line": 15,
+                    "body": manually_revised_comment,
                 }
             ],
         ]
@@ -834,6 +1068,10 @@ class QueueTests(unittest.TestCase):
         )
         self.assertEqual(
             history["review_rounds"][0]["findings"][0]["status"], "submitted"
+        )
+        self.assertEqual(
+            history["review_rounds"][0]["findings"][0]["review_comment"],
+            manually_revised_comment,
         )
 
     @patch.object(review_queue, "run_json")
