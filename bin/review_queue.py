@@ -53,6 +53,19 @@ GITHUB_PR_URL_PATTERN = re.compile(
     r"^https://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)/pull/(?P<number>[1-9]\d*)/?$"
 )
+UPDATE_REVIEW_COMMENT_MUTATION = """
+mutation UpdatePullRequestReviewComment($commentId: ID!, $body: String!) {
+  updatePullRequestReviewComment(
+    input: {pullRequestReviewCommentId: $commentId, body: $body}
+  ) {
+    pullRequestReviewComment {
+      id
+      body
+      url
+    }
+  }
+}
+""".strip()
 
 
 class QueueError(RuntimeError):
@@ -2061,6 +2074,44 @@ def match_remote_review_comment(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def update_remote_review_comment(
+    remote_comment: dict[str, Any], body: str
+) -> dict[str, Any]:
+    """Update a pending review comment through its GraphQL node id."""
+    node_id = remote_comment.get("node_id")
+    if not node_id:
+        raise QueueError("GitHub review comment is missing its GraphQL node id")
+
+    response = run_json(
+        ["gh", "api", "graphql", "--input", "-"],
+        input_data={
+            "query": UPDATE_REVIEW_COMMENT_MUTATION,
+            "variables": {"commentId": node_id, "body": body},
+        },
+    )
+    errors = response.get("errors") or []
+    if errors:
+        messages = ", ".join(
+            error.get("message", "unknown GraphQL error") for error in errors
+        )
+        raise QueueError(f"GitHub could not update the review comment: {messages}")
+
+    updated = (
+        response.get("data", {})
+        .get("updatePullRequestReviewComment", {})
+        .get("pullRequestReviewComment")
+    )
+    if not updated:
+        raise QueueError("GitHub did not return the updated review comment")
+
+    return {
+        **remote_comment,
+        "node_id": updated.get("id") or node_id,
+        "body": updated.get("body") or body,
+        "html_url": updated.get("url") or remote_comment.get("html_url"),
+    }
+
+
 def edit_draft_review(
     state_path: Path,
     key: str,
@@ -2217,17 +2268,9 @@ def edit_draft_review(
                 f"Could not uniquely match GitHub comment for {finding_key}"
             )
         if remote_comment.get("body") != normalized["review_comment"]:
-            comment_response = run_json(
-                [
-                    "gh",
-                    "api",
-                    "--method",
-                    "PATCH",
-                    f"repos/{repository}/pulls/comments/{remote_comment['id']}",
-                    "--input",
-                    "-",
-                ],
-                input_data={"body": normalized["review_comment"]},
+            comment_response = update_remote_review_comment(
+                remote_comment,
+                normalized["review_comment"],
             )
 
     summary_changed = old_payload["body"] != new_payload["body"]

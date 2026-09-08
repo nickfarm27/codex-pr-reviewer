@@ -832,6 +832,7 @@ class QueueTests(unittest.TestCase):
             [
                 {
                     "id": 701,
+                    "node_id": "PRRC_test701",
                     "path": "app/models/widget.rb",
                     "line": 15,
                     "body": original_comment,
@@ -839,11 +840,18 @@ class QueueTests(unittest.TestCase):
                 }
             ],
             {
-                "id": 701,
-                "path": "app/models/widget.rb",
-                "line": 15,
-                "body": revised_comment,
-                "html_url": "https://github.com/acme/widgets/pull/12#discussion-701",
+                "data": {
+                    "updatePullRequestReviewComment": {
+                        "pullRequestReviewComment": {
+                            "id": "PRRC_test701",
+                            "body": revised_comment,
+                            "url": (
+                                "https://github.com/acme/widgets/pull/12"
+                                "#discussion-701"
+                            ),
+                        }
+                    }
+                }
             },
         ]
 
@@ -862,8 +870,17 @@ class QueueTests(unittest.TestCase):
             "https://github.com/acme/widgets/pull/12#discussion-701",
         )
         patch_call = run_json_mock.call_args_list[3]
-        self.assertIn("PATCH", patch_call.args[0])
-        self.assertEqual(patch_call.kwargs["input_data"], {"body": revised_comment})
+        self.assertEqual(
+            patch_call.args[0], ["gh", "api", "graphql", "--input", "-"]
+        )
+        self.assertEqual(
+            patch_call.kwargs["input_data"]["variables"],
+            {"commentId": "PRRC_test701", "body": revised_comment},
+        )
+        self.assertIn(
+            "updatePullRequestReviewComment",
+            patch_call.kwargs["input_data"]["query"],
+        )
         history = review_queue.review_history(
             self.state_path, item["repository"], item["number"]
         )
