@@ -36,9 +36,9 @@ Work in the Codex PR Reviewer project and keep the action tied to the current PR
      "end_line": 18,
      "explanation": "The new all-countries check conflicts with the clarified requirement.",
      "failure_example": "A GB-only account remains blocked because CH is not configured.",
-     "safeguard": "Cover GB-only and CH-only activation in focused tests.",
-     "safeguard_kind": "regression_test",
-     "review_comment": "This currently requires both countries to be ready. For example, a GB-only account remains blocked when CH is intentionally unconfigured. Could we allow activation when either configured country is ready and cover the GB-only and CH-only cases?"
+     "safeguard": "Treat the supported-country list as capabilities, require at least one ready account, and expose methods only for ready countries.",
+     "safeguard_kind": "implementation",
+     "review_comment": "This currently requires both countries to be ready. For example, a GB-only account remains blocked when CH is intentionally unconfigured. Could we treat the country list as capabilities instead: allow activation when at least one account is ready and expose methods only for ready countries? Focused GB-only and CH-only tests can verify the chosen implementation."
    }
    ```
 
@@ -47,6 +47,8 @@ Work in the Codex PR Reviewer project and keep the action tied to the current PR
    ```
 
    The user's request to include or draft their own feedback counts as acceptance of that item; do not ask them to accept it again. The command assigns an append-only `U-01`, `U-02`, and so on, records `source: user`, deduplicates retries, and refuses a stale head.
+
+   Make the comment understandable without a follow-up: state the problem, why it matters, one concrete example, and a small possible solution shape. Prefer implementation sketches, responsibility splits, before/after values, or short event timelines. Use a regression test as the main example only when it genuinely explains the behavior better. Tiny text diagrams are optional when they clarify architecture, state, or data flow; omit them when prose is simpler. Treat every proposed solution as illustrative rather than required architecture.
 
 3. Generate and inspect the exact pending-review payload:
 

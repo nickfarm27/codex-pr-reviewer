@@ -34,6 +34,7 @@ FINDING_STATUSES = {
     "obsolete",
 }
 USER_FINDING_KINDS = {"defect", "required_change", "question", "suggestion"}
+AUTOMATED_FINDING_KINDS = {"defect", "maintainability"}
 EDITABLE_FINDING_FIELDS = {
     "severity",
     "title",
@@ -1311,7 +1312,17 @@ def complete_review(
         if findings_document is not None
         else {"findings": [], "previous_findings": []}
     )
-    findings = [validate_finding(item) for item in document["findings"]]
+    findings = []
+    for item in document["findings"]:
+        finding = validate_finding(item)
+        kind = item.get("kind", "defect")
+        if not isinstance(kind, str) or kind not in AUTOMATED_FINDING_KINDS:
+            raise QueueError(
+                f"Invalid automated finding kind for {finding['id']}: {kind}; "
+                f"choose from {sorted(AUTOMATED_FINDING_KINDS)}"
+            )
+        finding["kind"] = kind
+        findings.append(finding)
     finding_ids = [item["id"] for item in findings]
     if len(finding_ids) != len(set(finding_ids)):
         raise QueueError("Finding IDs must be unique within a review round")
@@ -1371,7 +1382,7 @@ def complete_review(
                     source, kind, added_after_completion, status,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          'agent', 'defect', 0, 'proposed', ?, ?)
+                          'agent', ?, 0, 'proposed', ?, ?)
                 """,
                 (
                     review["id"],
@@ -1387,6 +1398,7 @@ def complete_review(
                     finding["safeguard_kind"],
                     finding["review_comment"],
                     finding["fingerprint"],
+                    finding["kind"],
                     timestamp,
                     timestamp,
                 ),
@@ -2172,10 +2184,11 @@ def edit_draft_review(
         )
         normalized = validate_finding(merged, id_prefix=finding_key[0])
         new_kind = changes.get("kind", finding["kind"])
-        if new_kind not in USER_FINDING_KINDS:
+        editable_kinds = USER_FINDING_KINDS | AUTOMATED_FINDING_KINDS
+        if not isinstance(new_kind, str) or new_kind not in editable_kinds:
             raise QueueError(
                 f"Invalid finding kind: {new_kind}; choose from "
-                f"{sorted(USER_FINDING_KINDS)}"
+                f"{sorted(editable_kinds)}"
             )
         new_source_note = changes.get("source_note", finding["source_note"])
         if new_source_note is not None and (

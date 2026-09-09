@@ -37,6 +37,7 @@ def finding_document() -> dict:
         "findings": [
             {
                 "id": "F-01",
+                "kind": "defect",
                 "severity": "P2",
                 "title": "Keep widget ownership stable",
                 "path": "app/models/widget.rb",
@@ -88,8 +89,10 @@ class QueueTests(unittest.TestCase):
     def complete_with_finding(self, item: dict) -> tuple[Path, Path]:
         report = Path(self.temporary.name) / f"report-{item['number']}.md"
         findings = Path(self.temporary.name) / f"findings-{item['number']}.json"
+        document = finding_document()
+        document["findings"][0].pop("kind")
         report.write_text("# Review\n")
-        findings.write_text(json.dumps(finding_document()))
+        findings.write_text(json.dumps(document))
         review_queue.complete_review(
             self.state_path, item["key"], report, findings
         )
@@ -513,6 +516,7 @@ class QueueTests(unittest.TestCase):
 
         finding = history["review_rounds"][0]["findings"][0]
         self.assertEqual(finding["finding_key"], "F-01")
+        self.assertEqual(finding["kind"], "defect")
         self.assertEqual(finding["status"], "proposed")
         self.assertIn("another owner", finding["failure_example"])
 
@@ -628,6 +632,51 @@ class QueueTests(unittest.TestCase):
 
         with self.assertRaisesRegex(review_queue.QueueError, "cannot precede"):
             review_queue.validate_finding(finding)
+
+    @patch.object(review_queue, "candidates")
+    def test_automated_maintainability_finding_is_stored(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "maintainability.md"
+        findings = Path(self.temporary.name) / "maintainability.json"
+        document = finding_document()
+        document["findings"][0]["kind"] = "maintainability"
+        report.write_text("# Review\n")
+        findings.write_text(json.dumps(document))
+
+        review_queue.complete_review(self.state_path, item["key"], report, findings)
+        history = review_queue.review_history(
+            self.state_path, item["repository"], item["number"]
+        )
+
+        self.assertEqual(
+            history["review_rounds"][0]["findings"][0]["kind"],
+            "maintainability",
+        )
+
+    @patch.object(review_queue, "candidates")
+    def test_invalid_automated_finding_kind_is_rejected(
+        self, candidates_mock
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "style.md"
+        findings = Path(self.temporary.name) / "style.json"
+        document = finding_document()
+        document["findings"][0]["kind"] = "style"
+        report.write_text("# Review\n")
+        findings.write_text(json.dumps(document))
+
+        with self.assertRaisesRegex(
+            review_queue.QueueError, "Invalid automated finding kind"
+        ):
+            review_queue.complete_review(
+                self.state_path, item["key"], report, findings
+            )
 
     @patch.object(review_queue, "candidates")
     def test_preview_review_uses_only_accepted_findings(
@@ -788,7 +837,15 @@ class QueueTests(unittest.TestCase):
         item = candidate()
         candidates_mock.return_value = [item]
         review_queue.claim_candidate(self.config, self.state_path)
-        self.complete_with_finding(item)
+        report = Path(self.temporary.name) / "maintainability-review.md"
+        findings_path = Path(self.temporary.name) / "maintainability-findings.json"
+        document = finding_document()
+        document["findings"][0]["kind"] = "maintainability"
+        report.write_text("# Review\n")
+        findings_path.write_text(json.dumps(document))
+        review_queue.complete_review(
+            self.state_path, item["key"], report, findings_path
+        )
         review_queue.decide_findings(
             self.state_path,
             item["key"],
@@ -886,6 +943,7 @@ class QueueTests(unittest.TestCase):
         )
         finding = history["review_rounds"][0]["findings"][0]
         github_review = history["review_rounds"][0]["github_reviews"][0]
+        self.assertEqual(finding["kind"], "maintainability")
         self.assertEqual(finding["review_comment"], revised_comment)
         self.assertEqual(github_review["comments"][0]["github_comment_id"], 701)
         self.assertEqual(github_review["comments"][0]["body"], revised_comment)

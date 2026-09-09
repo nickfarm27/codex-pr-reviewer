@@ -35,29 +35,30 @@ Staff user + OAuth app
 
 ## Findings
 
-### P2 — Keep orphaned connections revocable
+### Defects
+
+#### P2 — Keep orphaned connections revocable
 
 `app/models/oauth/connection.rb:13`
 
 `subject` is required, but the polymorphic owner can be hard-deleted without database cleanup. A later `Connection#revoke!` validates the missing association and raises before the connection and credentials are marked revoked, so token exchange or cleanup can return a 500 instead of retiring the orphan.
 
-**Example failure**
+**Concrete example**
 
 A staff user authorizes an AI client and is later hard-deleted. When token exchange discovers the orphaned connection and calls `revoke!`, the missing required `subject` makes the update fail validation; the connection and credentials remain active instead of being retired.
 
-**Example regression test**
+**Possible solution**
 
 ```ruby
-test "an orphaned connection can still be revoked" do
-  connection = create_connection
-  connection.subject.destroy!
+belongs_to :subject, polymorphic: true, optional: true
+validate :active_connection_has_subject
 
-  assert_nothing_raised { connection.reload.revoke!(reason: :subject_deleted) }
-  assert connection.reload.revoked?
+def active_connection_has_subject
+  errors.add(:subject, "must exist while active") if active? && subject.nil?
 end
 ```
 
-One valid fix is to revoke connections as part of subject deletion. Another is to let historical connections tolerate a missing subject during revocation; the test captures the required behavior without prescribing which design to use.
+This is only the solution shape: require a subject while the connection is active, but let a historical orphan transition to revoked. Revoking connections as part of subject deletion is another valid design. A focused orphan-revocation test would still be useful verification, but it is not the explanation itself.
 
 ## Fastest review path
 

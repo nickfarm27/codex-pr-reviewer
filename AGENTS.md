@@ -6,15 +6,22 @@ This repository coordinates private, report-only reviews of GitHub pull requests
 
 - Optimize for signal, not comment count. A review with no findings is a successful result.
 - Do not raise a problem merely to have something to report.
-- Report only defects that are concrete, actionable, introduced by the pull request, and meaningful to correctness, security, reliability, data integrity, or maintainability.
+- Report only concrete, actionable issues introduced by the pull request. Use the defect gate for correctness, security, reliability, and data-integrity failures; use the maintainability gate for material design or code-quality regressions.
 - Do not report style preferences, naming opinions, speculative future concerns, obvious lint, or matters already enforced by deterministic CI.
 - Before reporting a finding, inspect relevant callers, tests, and surrounding behavior. Confirm the alleged issue is not intentional or handled elsewhere.
-- If evidence is insufficient, omit the finding or put the uncertainty in a private review summary; do not present it as a defect.
+- If evidence is insufficient, omit the finding or put the uncertainty in a private review summary; do not present it as established.
 - Prefer a small number of high-confidence findings. Do not inflate severity.
-- Every finding must identify the affected file and tight line range, explain the failure mechanism, state the practical impact, and immediately include a concrete failure example plus a small illustrative safeguard or focused regression test.
+- Every finding must identify the affected file and tight line range, explain the concrete defect or maintenance cost, state why it matters, and include the smallest example that makes it understandable.
+- Prefer a small illustrative solution shape over a regression test. Use a regression test when behavior is the clearest way to explain or verify the concern, not as a mandatory template.
 - Example fixes are aids to understanding, not mandatory architecture. Keep them compatible with the codebase and say when the exact implementation is a design choice.
+- Use a tiny text diagram only when an architecture, state transition, or data flow would otherwise be harder to understand. Omit it when prose or a small example is simpler.
 
-Use this final gate before raising any finding: **introduced here, reachable, consequential, evidenced, and not already covered**. If one of those is uncertain, investigate further or omit it. Suggestions and possible enhancements are not defects and must not be presented as findings.
+Use the applicable final gate before raising a finding:
+
+- **Defect:** introduced here, reachable, consequential, evidenced, and not already covered.
+- **Maintainability:** introduced here, materially harder to understand, test, change, or safely extend; evidenced against the repository's existing design; actionable with a bounded improvement; and not merely style, taste, or a hypothetical future enhancement.
+
+If a required part is uncertain, investigate further or omit the finding. Do not call a maintainability concern a defect, and do not demand a named design pattern merely for its own sake.
 
 ## Reviewer briefing
 
