@@ -154,6 +154,6 @@ For cloning, configuration, Codex project creation, scheduling, migration, and t
 
 ## Peer review skill
 
-The same review prompt is also packaged as the explicitly invoked `nickfarm27-pr-review` skill for peers who want Nicholas's review before requesting it on GitHub. It requires GitHub and Linear access, checks its release before every review, and remains report-only.
+The reusable review core from the dispatcher prompt is also packaged as the explicitly invoked `nickfarm27-pr-review` skill for peers who want Nicholas's review before requesting it on GitHub. It requires GitHub and Linear access, checks its release before every review, and remains report-only.
 
-The peer distribution lives under [`peer/`](peer/README.md) in this repository. Its setup detects Codex and Claude Code and installs the skill at user scope without enabling the dispatcher or creating project state. Tags matching `peer-vX.Y.Z` publish a peer-only GitHub Release archive and checksum.
+The peer distribution lives under [`peer/`](peer/README.md) in this repository. Follow the [peer skill setup guide](peer/SETUP.md) to install it on another machine. Its setup detects Codex and Claude Code and installs the skill at user scope without enabling the dispatcher or creating project state. Tags matching `peer-vX.Y.Z` publish a peer-only GitHub Release archive and checksum.

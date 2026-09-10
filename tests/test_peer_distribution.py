@@ -37,9 +37,12 @@ class PeerDistributionTests(unittest.TestCase):
             capture_output=True,
         )
 
-    def test_peer_prompt_is_exact_copy_of_source_review_prompt(self) -> None:
-        source = (ROOT / "prompts" / "review.md").read_bytes()
-        packaged = (SKILL / "references" / "review-prompt.md").read_bytes()
+    def test_peer_core_is_the_exact_reusable_slice_of_the_review_prompt(self) -> None:
+        source_prompt = (ROOT / "prompts" / "review.md").read_bytes()
+        start = source_prompt.index(b"## 2. Build the minimum useful context")
+        end = source_prompt.index(b"## 6. Complete the cycle")
+        source = source_prompt[start:end].rstrip(b"\n") + b"\n"
+        packaged = (SKILL / "references" / "review-core.md").read_bytes()
         self.assertEqual(source, packaged)
 
     def test_version_is_consistent_across_skill_and_manifests(self) -> None:
@@ -196,12 +199,13 @@ class PeerDistributionTests(unittest.TestCase):
             )
             self.assertIn("nickfarm27-pr-review/setup", names)
             self.assertTrue(members["nickfarm27-pr-review/setup"].mode & 0o111)
+            self.assertIn("nickfarm27-pr-review/SETUP.md", names)
             self.assertTrue(
                 any(name.endswith("/skills/nickfarm27-pr-review/SKILL.md") for name in names)
             )
             self.assertTrue(any(name.endswith("/scripts/check-update") for name in names))
             self.assertTrue(
-                any(name.endswith("/references/review-prompt.md") for name in names)
+                any(name.endswith("/references/review-core.md") for name in names)
             )
             self.assertFalse(any("review_queue.py" in name for name in names))
             self.assertFalse(any("reviews.db" in name for name in names))

@@ -12,9 +12,18 @@ case "$VERSION" in
   ''|*[!0-9.]*|.*|*.) echo "Invalid peer version: $VERSION" >&2; exit 1 ;;
 esac
 
-cmp -s "$REPO_ROOT/prompts/review.md" "$PLUGIN_ROOT/skills/nickfarm27-pr-review/references/review-prompt.md" || {
-  echo "The packaged review prompt differs from prompts/review.md." >&2
-  echo "Synchronize the peer copy without changing the source prompt." >&2
+extract_review_core() {
+  awk '
+    /^## 2\. Build the minimum useful context/ { copy = 1 }
+    /^## 6\. Complete the cycle/ { exit }
+    copy && $0 == "" { blanks = blanks "\n"; next }
+    copy { printf "%s", blanks; blanks = ""; print }
+  ' "$REPO_ROOT/prompts/review.md"
+}
+
+extract_review_core | cmp -s - "$PLUGIN_ROOT/skills/nickfarm27-pr-review/references/review-core.md" || {
+  echo "The packaged review core is not an exact extraction of sections 2-5 in prompts/review.md." >&2
+  echo "Synchronize the peer copy without changing the source review prompt." >&2
   exit 1
 }
 
@@ -23,7 +32,7 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 bundle="nickfarm27-pr-review"
 stage="$tmp_dir/$bundle"
 mkdir -p "$stage/bin" "$stage/plugins"
-cp "$PEER_ROOT/setup" "$PEER_ROOT/upgrade" "$PEER_ROOT/uninstall" "$PEER_ROOT/README.md" "$stage/"
+cp "$PEER_ROOT/setup" "$PEER_ROOT/upgrade" "$PEER_ROOT/uninstall" "$PEER_ROOT/README.md" "$PEER_ROOT/SETUP.md" "$stage/"
 cp "$PEER_ROOT/bin/doctor" "$PEER_ROOT/bin/check-update" "$stage/bin/"
 cp -R "$PLUGIN_ROOT" "$stage/plugins/"
 mkdir -p "$OUTPUT_DIR"

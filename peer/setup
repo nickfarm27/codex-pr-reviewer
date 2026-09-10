@@ -103,7 +103,7 @@ echo ""
 echo "Installed for: $INSTALLED_HOSTS"
 echo "The review requires GitHub CLI authentication and Linear read-only MCP access."
 echo "Codex Linear setup: codex mcp add linear --url https://mcp.linear.app/mcp/readonly"
-echo "Claude Linear setup: claude mcp add --transport http linear https://mcp.linear.app/mcp/readonly"
+echo "Claude Linear setup: claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/readonly"
 echo "Complete the client's OAuth flow before invoking the skill."
 
 if [ "$RUN_DOCTOR" -eq 1 ]; then

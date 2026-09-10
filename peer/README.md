@@ -2,6 +2,8 @@
 
 Install Nicholas's private, report-only pull-request review workflow into Codex or Claude Code. The skill requires authenticated GitHub access and Linear's read-only MCP server, checks that its release is current before every review, and never writes to the reviewed repository or publishes a GitHub review.
 
+For a guided installation on a new machine, start with [SETUP.md](SETUP.md).
+
 ## Requirements
 
 - macOS or Linux with Git and Bash
@@ -37,7 +39,7 @@ Connect Linear if setup reports that it is missing:
 
 ```sh
 codex mcp add linear --url https://mcp.linear.app/mcp/readonly
-claude mcp add --transport http linear https://mcp.linear.app/mcp/readonly
+claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/readonly
 ```
 
 Complete the OAuth flow in the relevant client. The skill proves access by reading the related Linear issue before it begins a review.
@@ -80,7 +82,7 @@ When running from a release archive, omit the `peer/` prefix. A clone updates wi
 
 ## Maintainers
 
-The portable skill contains an exact copy of `prompts/review.md`. Tests reject a release if the two files differ. Peer-specific boundaries in `SKILL.md` disable dispatcher state, report files, GitHub writes, and reduced-context reviews without changing the source review prompt.
+The portable skill contains an exact extraction of the reusable sections 2–5 from `prompts/review.md`. The dispatcher prompt remains canonical and unchanged, while the peer wrapper provides different lifecycle and permission boundaries. Tests reject a release if the packaged core drifts. Peer-specific boundaries in `SKILL.md` disable dispatcher state, report files, GitHub writes, and reduced-context reviews without changing the shared review behavior.
 
 Set the same semantic version in:
 
