@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a peer version bump
+        if: github.event_name == 'pull_request'
+        run: peer/bin/check-version-bump "${{ github.event.pull_request.base.sha }}"
       - name: Run unit tests
         run: python3 -m unittest discover -s tests -v
       - name: Validate peer package

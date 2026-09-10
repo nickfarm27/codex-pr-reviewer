@@ -32,6 +32,20 @@ git clone --depth 1 https://github.com/nickfarm27/codex-pr-reviewer.git ~/.local
 
 Use `--host codex` or `--host claude` instead of `auto` when you only want one agent.
 
+### Peer-only GitHub Release
+
+To avoid cloning the dispatcher, download the matching `.tar.gz` and `.sha256` assets from the [latest GitHub Release](https://github.com/nickfarm27/codex-pr-reviewer/releases). Then verify and install them:
+
+```sh
+cd ~/Downloads
+shasum -a 256 -c nickfarm27-pr-review-X.Y.Z.tar.gz.sha256
+mkdir -p ~/.local/share
+tar -xzf nickfarm27-pr-review-X.Y.Z.tar.gz -C ~/.local/share
+~/.local/share/nickfarm27-pr-review/setup --host auto
+```
+
+Replace `X.Y.Z` with the release version. Keep the extracted directory in place because the installed skill links point to it.
+
 ### Native Claude Code plugin
 
 Claude Code can install directly from the repository marketplace instead of using the checkout-based setup:
@@ -79,6 +93,8 @@ For an installation created by `setup`, run:
 ~/.local/share/codex-pr-reviewer/peer/bin/doctor --host auto
 ```
 
+For a peer-only release installation, use `~/.local/share/nickfarm27-pr-review/bin/doctor --host auto` instead.
+
 Use `--host codex`, `--host claude`, or `--host custom --skills-dir /path/to/agent/skills` when appropriate. For the native Claude plugin, verify it with:
 
 ```sh
@@ -105,6 +121,8 @@ For a checkout or release installation:
 ~/.local/share/codex-pr-reviewer/peer/upgrade
 ~/.local/share/codex-pr-reviewer/peer/uninstall --host auto
 ```
+
+For a peer-only release, replace `~/.local/share/codex-pr-reviewer/peer` with `~/.local/share/nickfarm27-pr-review`.
 
 For the native Claude plugin:
 

@@ -12,18 +12,9 @@ case "$VERSION" in
   ''|*[!0-9.]*|.*|*.) echo "Invalid peer version: $VERSION" >&2; exit 1 ;;
 esac
 
-extract_review_core() {
-  awk '
-    /^## 2\. Build the minimum useful context/ { copy = 1 }
-    /^## 6\. Complete the cycle/ { exit }
-    copy && $0 == "" { blanks = blanks "\n"; next }
-    copy { printf "%s", blanks; blanks = ""; print }
-  ' "$REPO_ROOT/prompts/review.md"
-}
-
-extract_review_core | cmp -s - "$PLUGIN_ROOT/skills/nickfarm27-pr-review/references/review-core.md" || {
-  echo "The packaged review core is not an exact extraction of sections 2-5 in prompts/review.md." >&2
-  echo "Synchronize the peer copy without changing the source review prompt." >&2
+cmp -s "$REPO_ROOT/prompts/review-core.md" "$PLUGIN_ROOT/skills/nickfarm27-pr-review/references/review-core.md" || {
+  echo "The packaged review core differs from prompts/review-core.md." >&2
+  echo "Synchronize the peer copy before publishing." >&2
   exit 1
 }
 

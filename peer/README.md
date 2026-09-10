@@ -82,7 +82,7 @@ When running from a release archive, omit the `peer/` prefix. A clone updates wi
 
 ## Maintainers
 
-The portable skill contains an exact extraction of the reusable sections 2–5 from `prompts/review.md`. The dispatcher prompt remains canonical and unchanged, while the peer wrapper provides different lifecycle and permission boundaries. Tests reject a release if the packaged core drifts. Peer-specific boundaries in `SKILL.md` disable dispatcher state, report files, GitHub writes, and reduced-context reviews without changing the shared review behavior.
+`prompts/review-core.md` is the canonical, harness-neutral review policy. The dispatcher wrapper references it directly. The portable skill contains an exact release snapshot, and tests reject the package if that copy drifts. Peer-specific instructions in `SKILL.md` provide the required GitHub and Linear preflight, chat-only output, and report-only permission boundary.
 
 Set the same semantic version in:
 
@@ -96,5 +96,7 @@ Run the full suite before tagging:
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+Pull-request CI requires a version bump whenever the shared review policy or release payload changes. Documentation and test-only changes outside `peer/` do not require one.
 
 Push a tag such as `peer-v0.1.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.

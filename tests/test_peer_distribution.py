@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -37,13 +38,34 @@ class PeerDistributionTests(unittest.TestCase):
             capture_output=True,
         )
 
-    def test_peer_core_is_the_exact_reusable_slice_of_the_review_prompt(self) -> None:
-        source_prompt = (ROOT / "prompts" / "review.md").read_bytes()
-        start = source_prompt.index(b"## 2. Build the minimum useful context")
-        end = source_prompt.index(b"## 6. Complete the cycle")
-        source = source_prompt[start:end].rstrip(b"\n") + b"\n"
+    def test_dispatcher_and_peer_share_the_exact_review_core(self) -> None:
+        source = (ROOT / "prompts" / "review-core.md").read_bytes()
         packaged = (SKILL / "references" / "review-core.md").read_bytes()
         self.assertEqual(source, packaged)
+
+        dispatcher = (ROOT / "prompts" / "review.md").read_text()
+        core = source.decode()
+        self.assertIn("prompts/review-core.md", dispatcher)
+        for dispatcher_only_term in (
+            "review_queue.py",
+            "suggested_report_path",
+            "suggested_findings_path",
+            "previous_review",
+            "claim_key",
+        ):
+            self.assertNotIn(dispatcher_only_term, core)
+
+    def test_dispatcher_wrapper_keeps_the_review_lifecycle(self) -> None:
+        dispatcher = (ROOT / "prompts" / "review.md").read_text()
+        for command in (
+            "review_queue.py prepare",
+            "review_queue.py heartbeat",
+            "review_queue.py complete",
+            "review_queue.py fail",
+        ):
+            self.assertIn(command, dispatcher)
+        self.assertIn("suggested_report_path", dispatcher)
+        self.assertIn("suggested_findings_path", dispatcher)
 
     def test_version_is_consistent_across_skill_and_manifests(self) -> None:
         version = (PLUGIN / "VERSION").read_text().strip()
@@ -82,6 +104,21 @@ class PeerDistributionTests(unittest.TestCase):
 
             self.run_script(PEER / "uninstall", "--host", "codex", env=env)
             self.assertFalse(installed.exists())
+
+    def test_codex_install_uses_codex_home_skills_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            codex_home = Path(temporary) / "codex-home"
+            self.run_script(
+                PEER / "setup",
+                "--host",
+                "codex",
+                "--skip-doctor",
+                env={"CODEX_HOME": str(codex_home)},
+            )
+
+            installed = codex_home / "skills" / "nickfarm27-pr-review"
+            self.assertTrue(installed.is_symlink())
+            self.assertEqual(Path(os.readlink(installed)), SKILL)
 
     def test_setup_refuses_to_overwrite_an_existing_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -172,6 +209,78 @@ class PeerDistributionTests(unittest.TestCase):
             )
             self.assertEqual(stale.returncode, 10)
             self.assertIn("not current", stale.stderr)
+
+    def test_peer_runtime_changes_require_a_version_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = Path(temporary)
+            script = repo / "peer" / "bin" / "check-version-bump"
+            version = (
+                repo
+                / "peer"
+                / "plugins"
+                / "nickfarm27-pr-review"
+                / "VERSION"
+            )
+            readme = repo / "peer" / "README.md"
+            script.parent.mkdir(parents=True)
+            version.parent.mkdir(parents=True)
+            shutil.copy2(PEER / "bin" / "check-version-bump", script)
+            version.write_text("0.1.0\n")
+            readme.write_text("initial\n")
+
+            def git(*args: str) -> str:
+                result = subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                )
+                return result.stdout.strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Test User")
+            git("config", "user.email", "test@example.com")
+            git("add", ".")
+            git("commit", "-qm", "initial")
+            base = git("rev-parse", "HEAD")
+
+            readme.write_text("changed\n")
+            git("add", ".")
+            git("commit", "-qm", "change runtime")
+            missing_bump = subprocess.run(
+                [str(script), base],
+                cwd=repo,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(missing_bump.returncode, 1)
+            self.assertIn("without a version increase", missing_bump.stderr)
+
+            version.write_text("0.0.9\n")
+            git("add", ".")
+            git("commit", "-qm", "lower version")
+            lower_version = subprocess.run(
+                [str(script), base],
+                cwd=repo,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(lower_version.returncode, 1)
+
+            version.write_text("0.2.0\n")
+            git("add", ".")
+            git("commit", "-qm", "bump version")
+            with_bump = subprocess.run(
+                [str(script), base],
+                cwd=repo,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertIn("0.1.0 to 0.2.0", with_bump.stdout)
 
     def test_release_archive_contains_only_peer_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
