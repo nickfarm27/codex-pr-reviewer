@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PLUGIN_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+VERSION_FILE="$PLUGIN_ROOT/VERSION"
+REPOSITORY="nickfarm27/codex-pr-reviewer"
+
+[ -f "$VERSION_FILE" ] || {
+  echo "Nicholas PR Review cannot determine its installed version." >&2
+  exit 12
+}
+
+installed="$(tr -d '[:space:]' < "$VERSION_FILE")"
+command -v gh >/dev/null 2>&1 || {
+  echo "Nicholas PR Review requires GitHub CLI to verify its release." >&2
+  echo "Install gh, run 'gh auth login', then invoke the review again." >&2
+  exit 12
+}
+gh auth status >/dev/null 2>&1 || {
+  echo "Nicholas PR Review requires an authenticated GitHub CLI session." >&2
+  echo "Run 'gh auth login', then invoke the review again." >&2
+  exit 12
+}
+tag="$(gh release list --repo "$REPOSITORY" --limit 100 \
+  --json tagName,isDraft,isPrerelease \
+  --jq '[.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | startswith("peer-v")))][0].tagName' 2>/dev/null)" || {
+  echo "Nicholas PR Review could not verify the latest trusted GitHub Release." >&2
+  echo "Check network and repository access, then invoke the review again." >&2
+  exit 12
+}
+[ -n "$tag" ] || {
+  echo "Nicholas PR Review could not find a published peer release." >&2
+  exit 12
+}
+case "$tag" in
+  peer-v*) latest="${tag#peer-v}" ;;
+  *)
+    echo "Latest release '$tag' is not a Nicholas PR Review release." >&2
+    exit 12
+    ;;
+esac
+
+if [ "$installed" != "$latest" ]; then
+  peer_root="$(CDPATH= cd -- "$PLUGIN_ROOT/../.." 2>/dev/null && pwd || true)"
+  echo "Nicholas PR Review is not current (installed $installed, latest $latest)." >&2
+  if [ -n "$peer_root" ] && [ -x "$peer_root/upgrade" ]; then
+    echo "Run '$peer_root/upgrade', reload your agent, then invoke the review again." >&2
+  else
+    echo "Update the nickfarm27-pr-review plugin, reload your agent, then invoke the review again." >&2
+  fi
+  exit 10
+fi
+
+echo "Nicholas PR Review $installed is current."

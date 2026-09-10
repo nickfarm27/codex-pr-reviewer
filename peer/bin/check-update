@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "$SCRIPT_DIR/../plugins/nickfarm27-pr-review/skills/nickfarm27-pr-review/scripts/check-update"

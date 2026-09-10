@@ -151,3 +151,9 @@ python3 bin/reviewer_calibration.py mark-implemented --proposal C-001 --commit C
 Create a continuing local Codex task with `CALIBRATION_AUTOMATION_PROMPT.md`, test one manual audit, then attach a paused weekday schedule at 10:00 PM Asia/Kuala_Lumpur. Keeping the schedule in the same task retains earlier calibration discussion and decisions.
 
 For cloning, configuration, Codex project creation, scheduling, migration, and troubleshooting on another Mac, see [Set up on macOS](docs/setup-macos.md).
+
+## Peer review skill
+
+The reusable review core from the dispatcher prompt is also packaged as the explicitly invoked `nickfarm27-pr-review` skill for peers who want Nicholas's review before requesting it on GitHub. It requires GitHub and Linear access, checks its release before every review, and remains report-only.
+
+The peer distribution lives under [`peer/`](peer/README.md) in this repository. Follow the [peer skill setup guide](peer/SETUP.md) to install it on another machine. Its setup detects Codex and Claude Code and installs the skill at user scope without enabling the dispatcher or creating project state. Tags matching `peer-vX.Y.Z` publish a peer-only GitHub Release archive and checksum.

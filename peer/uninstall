@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -eu
+
+PEER_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SKILL_SOURCE="$PEER_ROOT/plugins/nickfarm27-pr-review/skills/nickfarm27-pr-review"
+HOST="auto"
+CUSTOM_SKILLS_DIR=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }; HOST="$2"; shift 2 ;;
+    --skills-dir) [ "$#" -ge 2 ] || { echo "Missing value for --skills-dir" >&2; exit 2; }; CUSTOM_SKILLS_DIR="$2"; shift 2 ;;
+    *) echo "Usage: ./peer/uninstall [--host auto|codex|claude|custom] [--skills-dir PATH]" >&2; exit 2 ;;
+  esac
+done
+
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}"
+CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+
+remove_link() {
+  host_name="$1"
+  target="$2/nickfarm27-pr-review"
+  if [ ! -L "$target" ]; then
+    if [ -e "$target" ]; then
+      echo "$host_name: kept non-link entry $target"
+    else
+      echo "$host_name: not installed"
+    fi
+    return
+  fi
+  existing="$(readlink "$target")"
+  if [ "$existing" != "$SKILL_SOURCE" ]; then
+    echo "$host_name: kept foreign link $target -> $existing"
+    return
+  fi
+  rm "$target"
+  echo "$host_name: removed $target"
+}
+
+case "$HOST" in
+  auto)
+    remove_link "codex" "$CODEX_SKILLS_DIR"
+    remove_link "claude" "$CLAUDE_SKILLS_DIR"
+    ;;
+  codex) remove_link "codex" "$CODEX_SKILLS_DIR" ;;
+  claude) remove_link "claude" "$CLAUDE_SKILLS_DIR" ;;
+  custom)
+    [ -n "$CUSTOM_SKILLS_DIR" ] || { echo "--host custom requires --skills-dir PATH" >&2; exit 2; }
+    remove_link "custom" "$CUSTOM_SKILLS_DIR"
+    ;;
+  *) echo "Unsupported host: $HOST" >&2; exit 2 ;;
+esac
