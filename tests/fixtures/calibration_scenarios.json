@@ -1,0 +1,40 @@
+{
+  "scenarios": [
+    {
+      "name": "unsupported_limit_withdrawn",
+      "category": "evidence",
+      "impact": "high",
+      "expected": "proposal_allowed_from_one_task"
+    },
+    {
+      "name": "solution_example_requested_repeatedly",
+      "category": "clarity",
+      "impact": "medium",
+      "expected": "proposal_only_after_two_tasks"
+    },
+    {
+      "name": "authorized_draft_blocked",
+      "category": "action_friction",
+      "impact": "high",
+      "expected": "proposal_allowed_from_one_task"
+    },
+    {
+      "name": "pending_draft_not_editable",
+      "category": "action_friction",
+      "impact": "high",
+      "expected": "proposal_allowed_from_one_task"
+    },
+    {
+      "name": "legitimate_pr_specific_design_debate",
+      "category": "preference",
+      "impact": "low",
+      "expected": "no_change"
+    },
+    {
+      "name": "stalled_task_needed_resume",
+      "category": "reliability",
+      "impact": "high",
+      "expected": "proposal_allowed_from_one_task"
+    }
+  ]
+}

@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config.json"
 DEFAULT_STATE = ROOT / ".state" / "reviews.db"
 LEGACY_STATE = ROOT / ".state" / "reviews.json"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_PR_BODY_CHARS = 12_000
 ACTIVE_STATUSES = {"claimed", "dispatched", "preparing", "reviewing"}
 FINDING_STATUSES = {
@@ -421,6 +421,74 @@ def connect_state(path: Path, *, import_legacy: bool = True) -> sqlite3.Connecti
             payload_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS calibration_runs (
+            id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL,
+            window_start TEXT NOT NULL,
+            window_end TEXT NOT NULL,
+            historical INTEGER NOT NULL DEFAULT 0,
+            report_path TEXT,
+            error TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS calibration_one_running
+            ON calibration_runs(status) WHERE status = 'running';
+
+        CREATE TABLE IF NOT EXISTS calibration_threads (
+            thread_id TEXT PRIMARY KEY,
+            host_id TEXT,
+            title TEXT,
+            source TEXT NOT NULL,
+            project_id TEXT,
+            pull_request_id INTEGER REFERENCES pull_requests(id) ON DELETE SET NULL,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            last_audited_turn_id TEXT,
+            last_audited_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS calibration_signals (
+            id INTEGER PRIMARY KEY,
+            run_id INTEGER NOT NULL REFERENCES calibration_runs(id) ON DELETE CASCADE,
+            thread_id TEXT NOT NULL REFERENCES calibration_threads(thread_id) ON DELETE CASCADE,
+            turn_id TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            category TEXT NOT NULL,
+            impact TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            fingerprint TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(thread_id, turn_id, fingerprint)
+        );
+
+        CREATE TABLE IF NOT EXISTS calibration_proposals (
+            id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            target_layer TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            proposed_change TEXT NOT NULL,
+            expected_benefit TEXT NOT NULL,
+            downside TEXT NOT NULL,
+            regression_scenario TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'proposed',
+            decision_note TEXT,
+            implemented_commit TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS calibration_proposal_evidence (
+            proposal_id TEXT NOT NULL REFERENCES calibration_proposals(id) ON DELETE CASCADE,
+            signal_id INTEGER NOT NULL REFERENCES calibration_signals(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(proposal_id, signal_id)
+        );
         """
     )
     version_row = connection.execute(
@@ -465,6 +533,11 @@ def migrate_schema(connection: sqlite3.Connection, version: int) -> None:
                         f"ALTER TABLE findings ADD COLUMN {name} {declaration}"
                     )
             version = 2
+        if version == 2:
+            # Calibration tables are created idempotently by connect_state before
+            # migration. Advancing the version records that the additive schema is
+            # available without rewriting any review lifecycle data.
+            version = 3
         if version != SCHEMA_VERSION:
             raise QueueError(
                 f"No migration path from schema {version} to {SCHEMA_VERSION}"

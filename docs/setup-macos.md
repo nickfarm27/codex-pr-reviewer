@@ -88,7 +88,13 @@ Automated runs never write to GitHub. In a completed PR task, ask Codex to draft
 
 These actions require the existing `gh` authentication and explicit user requests. They abort if the PR head moved, if the expected pending review is missing, or if GitHub already has an unrelated pending review. The workflow does not approve PRs.
 
-## 7. Moving to another Mac
+## 7. Optional daily calibration
+
+Create one continuing local task in the same Codex project using `CALIBRATION_AUTOMATION_PROMPT.md`. Run it manually once, inspect the report, and then attach a paused weekday schedule for 10:00 PM in the Mac's `Asia/Kuala_Lumpur` timezone. Activate it only after the first digest is useful.
+
+The calibration task reads reviewer conversations touched since its previous successful run, including archived PR tasks remembered in SQLite. It suggests at most three general improvements and never changes the workflow automatically. Review decisions and evidence remain in `.state/reviews.db`; generated digests remain under `reports/calibration/`.
+
+## 8. Moving to another Mac
 
 Clone the repository and repeat the configuration steps. Normally do not copy `.cache/`, `.state/`, or `reports/`; they are machine-local. Recreate `config.json` with the new Codex project ID and local checkout paths, then create a new paused scheduled task. Repo-scoped skills under `.agents/skills/` arrive with the clone.
 

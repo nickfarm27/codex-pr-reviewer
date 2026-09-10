@@ -274,7 +274,7 @@ class QueueTests(unittest.TestCase):
         ).fetchone()["value"]
         migrated.close()
 
-        self.assertEqual(version, "2")
+        self.assertEqual(version, "3")
         self.assertEqual(dict(finding), {
             "source": "agent",
             "kind": "defect",

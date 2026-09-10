@@ -84,10 +84,11 @@ Review-request event IDs are part of the round identity when GitHub provides the
 
 ## Acting on findings
 
-The repo includes two discoverable Codex skills under `.agents/skills/`:
+The repo includes three discoverable Codex skills under `.agents/skills/`:
 
 - `draft-pr-review` records accepted automated findings or verified feedback you raise later, previews the exact review payload, and creates a pending GitHub review when explicitly requested.
 - `request-pr-changes` verifies that recorded pending review and submits it as `REQUEST_CHANGES` after a separate explicit request.
+- `reviewer-calibration` audits review conversations and records your decisions on evidence-backed workflow improvements; it applies a change only when you explicitly request implementation.
 
 If you notice something after a clean automated review, you do not need to ask GitHub for another review. Ask the continuing PR task to draft your concern. It verifies the concern against the exact current head, appends it to SQLite as `U-01`, `U-02`, and so on with `source: user`, and leaves the original report unchanged. User items can be requirements, questions, suggestions, or defects; they are described faithfully instead of being forced through the autonomous defect gate. Asking to draft your own item also accepts it, so there is no redundant confirmation step.
 
@@ -128,5 +129,25 @@ Every accepted finding explains the problem, why it matters, a concrete example,
 The reviewer stays inside the PR repository unless GitHub relationship metadata or resolved Linear context identifies a concrete cross-repository dependency. It can prepare up to two explicitly linked PRs at their exact heads in separate read-only cached checkouts, without running their code.
 
 See `examples/report-preview.md` for a fictional report illustrating the final format.
+
+## Daily workflow calibration
+
+An optional continuing Codex task can review the day's PR reviewer conversations and suggest ways to make the workflow clearer, more accurate, or easier to act on. It combines PR-bound task IDs from SQLite with active and archived tasks in the Codex project, so archiving a review does not erase its usefulness as calibration evidence.
+
+The audit is incremental and transactional. Failed runs do not advance per-task checkpoints. Suggestions normally need the same friction in two distinct tasks; a single high-impact failure can qualify when an unsupported finding was withdrawn, an authorized review action was blocked, review state was lost, or a task stalled unclearly. It proposes at most three changes and may conclude that no change is warranted.
+
+The daily task is advisory: it cannot edit this repository, automations, reviewed code, or GitHub. Use the `reviewer-calibration` skill to accept, reject, defer, revise, or explicitly implement a proposal. Reports live under `reports/calibration/`, while proposal state and evidence live in `.state/reviews.db`.
+
+Useful commands:
+
+```sh
+python3 bin/reviewer_calibration.py prepare
+python3 bin/reviewer_calibration.py history
+python3 bin/reviewer_calibration.py decide --accept C-001
+python3 bin/reviewer_calibration.py edit-proposal --proposal C-001 --edit /absolute/path/to/edit.json
+python3 bin/reviewer_calibration.py mark-implemented --proposal C-001 --commit COMMIT_SHA
+```
+
+Create a continuing local Codex task with `CALIBRATION_AUTOMATION_PROMPT.md`, test one manual audit, then attach a paused weekday schedule at 10:00 PM Asia/Kuala_Lumpur. Keeping the schedule in the same task retains earlier calibration discussion and decisions.
 
 For cloning, configuration, Codex project creation, scheduling, migration, and troubleshooting on another Mac, see [Set up on macOS](docs/setup-macos.md).
