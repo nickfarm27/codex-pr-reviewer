@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -eu
+
+usage() {
+  cat <<'EOF'
+Install Nicholas PR Review for supported local agents.
+
+Usage: ./peer/setup [--host auto|codex|claude|custom] [--skills-dir PATH] [--skip-doctor]
+
+Environment overrides for testing or non-standard installations:
+  NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR
+  NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR
+EOF
+}
+
+PEER_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SKILL_SOURCE="$PEER_ROOT/plugins/nickfarm27-pr-review/skills/nickfarm27-pr-review"
+HOST="auto"
+CUSTOM_SKILLS_DIR=""
+RUN_DOCTOR=1
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host)
+      [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }
+      HOST="$2"
+      shift 2
+      ;;
+    --host=*) HOST="${1#--host=}"; shift ;;
+    --skills-dir)
+      [ "$#" -ge 2 ] || { echo "Missing value for --skills-dir" >&2; exit 2; }
+      CUSTOM_SKILLS_DIR="$2"
+      shift 2
+      ;;
+    --skills-dir=*) CUSTOM_SKILLS_DIR="${1#--skills-dir=}"; shift ;;
+    --skip-doctor) RUN_DOCTOR=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$HOST" in
+  auto|codex|claude) [ -z "$CUSTOM_SKILLS_DIR" ] || { echo "--skills-dir requires --host custom" >&2; exit 2; } ;;
+  custom) [ -n "$CUSTOM_SKILLS_DIR" ] || { echo "--host custom requires --skills-dir PATH" >&2; exit 2; } ;;
+  *) echo "Unsupported host: $HOST (expected auto, codex, claude, or custom)" >&2; exit 2 ;;
+esac
+
+[ -f "$SKILL_SOURCE/SKILL.md" ] || {
+  echo "Skill source is missing: $SKILL_SOURCE" >&2
+  exit 1
+}
+
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
+CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+INSTALLED_HOSTS=""
+
+install_link() {
+  host_name="$1"
+  skills_dir="$2"
+  target="$skills_dir/nickfarm27-pr-review"
+
+  mkdir -p "$skills_dir"
+  if [ -L "$target" ]; then
+    existing="$(readlink "$target")"
+    if [ "$existing" != "$SKILL_SOURCE" ]; then
+      echo "Refusing to replace another $host_name skill link: $target -> $existing" >&2
+      return 1
+    fi
+    echo "$host_name: already linked"
+  elif [ -e "$target" ]; then
+    echo "Refusing to overwrite an existing $host_name skill: $target" >&2
+    return 1
+  else
+    ln -s "$SKILL_SOURCE" "$target"
+    echo "$host_name: installed $target"
+  fi
+  INSTALLED_HOSTS="${INSTALLED_HOSTS}${INSTALLED_HOSTS:+,}$host_name"
+}
+
+if [ "$HOST" = "codex" ]; then
+  install_link "codex" "$CODEX_SKILLS_DIR"
+elif [ "$HOST" = "claude" ]; then
+  install_link "claude" "$CLAUDE_SKILLS_DIR"
+elif [ "$HOST" = "custom" ]; then
+  install_link "custom" "$CUSTOM_SKILLS_DIR"
+else
+  detected=0
+  if command -v codex >/dev/null 2>&1 || [ -d "$(dirname "$CODEX_SKILLS_DIR")" ]; then
+    install_link "codex" "$CODEX_SKILLS_DIR"
+    detected=1
+  fi
+  if command -v claude >/dev/null 2>&1 || [ -d "$(dirname "$CLAUDE_SKILLS_DIR")" ]; then
+    install_link "claude" "$CLAUDE_SKILLS_DIR"
+    detected=1
+  fi
+  if [ "$detected" -eq 0 ]; then
+    echo "No supported agent detected. Re-run with --host codex or --host claude." >&2
+    exit 1
+  fi
+fi
+
+echo ""
+echo "Installed for: $INSTALLED_HOSTS"
+echo "The review requires GitHub CLI authentication and Linear read-only MCP access."
+echo "Codex Linear setup: codex mcp add linear --url https://mcp.linear.app/mcp/readonly"
+echo "Claude Linear setup: claude mcp add --transport http linear https://mcp.linear.app/mcp/readonly"
+echo "Complete the client's OAuth flow before invoking the skill."
+
+if [ "$RUN_DOCTOR" -eq 1 ]; then
+  if [ "$HOST" = "custom" ]; then
+    "$PEER_ROOT/bin/doctor" --host custom --skills-dir "$CUSTOM_SKILLS_DIR"
+  else
+    "$PEER_ROOT/bin/doctor" --host "$HOST"
+  fi
+fi

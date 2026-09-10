@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PEER_ROOT="$(dirname "$SCRIPT_DIR")"
+SKILL_SOURCE="$PEER_ROOT/plugins/nickfarm27-pr-review/skills/nickfarm27-pr-review"
+HOST="auto"
+CUSTOM_SKILLS_DIR=""
+CHECK_REMOTE=1
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }; HOST="$2"; shift 2 ;;
+    --skills-dir) [ "$#" -ge 2 ] || { echo "Missing value for --skills-dir" >&2; exit 2; }; CUSTOM_SKILLS_DIR="$2"; shift 2 ;;
+    --offline) CHECK_REMOTE=0; shift ;;
+    *) echo "Usage: doctor [--host auto|codex|claude|custom] [--skills-dir PATH] [--offline]" >&2; exit 2 ;;
+  esac
+done
+
+failures=0
+pass() { echo "✓ $1"; }
+fail() { echo "✗ $1" >&2; failures=$((failures + 1)); }
+note() { echo "! $1"; }
+
+[ -f "$SKILL_SOURCE/SKILL.md" ] && pass "Skill files are present" || fail "Skill files are missing"
+command -v git >/dev/null 2>&1 && pass "git is installed" || fail "git is required"
+if command -v gh >/dev/null 2>&1; then
+  pass "GitHub CLI is installed"
+  gh auth status >/dev/null 2>&1 && pass "GitHub CLI is authenticated" || fail "Run: gh auth login"
+else
+  fail "GitHub CLI is required"
+fi
+
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
+CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+check_link() {
+  host_name="$1"
+  target="$2/nickfarm27-pr-review"
+  if [ -L "$target" ] && [ "$(readlink "$target")" = "$SKILL_SOURCE" ]; then
+    pass "$host_name skill link is valid"
+  else
+    fail "$host_name skill link is missing or points elsewhere"
+  fi
+}
+
+checked_links=0
+case "$HOST" in
+  codex) checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR" ;;
+  claude) checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR" ;;
+  custom)
+    if [ -n "$CUSTOM_SKILLS_DIR" ]; then
+      checked_links=1
+      check_link "Custom harness" "$CUSTOM_SKILLS_DIR"
+    else
+      fail "--host custom requires --skills-dir PATH"
+    fi
+    ;;
+  auto)
+    if [ -L "$CODEX_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR"; fi
+    if [ -L "$CLAUDE_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR"; fi
+    ;;
+  *) fail "Unsupported host: $HOST" ;;
+esac
+[ "$checked_links" -eq 1 ] || fail "No installed Nicholas PR Review skill link was found"
+
+note "Linear authentication is verified at invocation by reading the related issue."
+note "Required endpoint: https://mcp.linear.app/mcp/readonly"
+
+if [ "$CHECK_REMOTE" -eq 1 ]; then
+  "$PEER_ROOT/bin/check-update" || failures=$((failures + 1))
+else
+  note "Remote version check skipped"
+fi
+
+if [ "$failures" -gt 0 ]; then
+  echo "Doctor found $failures blocking problem(s)." >&2
+  exit 1
+fi
+echo "Doctor passed. Linear access will receive a final runtime check."

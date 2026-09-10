@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PEER_ROOT="$(dirname "$SCRIPT_DIR")"
+REPO_ROOT="$(dirname "$PEER_ROOT")"
+PLUGIN_ROOT="$PEER_ROOT/plugins/nickfarm27-pr-review"
+VERSION="$(tr -d '[:space:]' < "$PLUGIN_ROOT/VERSION")"
+OUTPUT_DIR="${1:-$REPO_ROOT/dist}"
+
+case "$VERSION" in
+  ''|*[!0-9.]*|.*|*.) echo "Invalid peer version: $VERSION" >&2; exit 1 ;;
+esac
+
+cmp -s "$REPO_ROOT/prompts/review.md" "$PLUGIN_ROOT/skills/nickfarm27-pr-review/references/review-prompt.md" || {
+  echo "The packaged review prompt differs from prompts/review.md." >&2
+  echo "Synchronize the peer copy without changing the source prompt." >&2
+  exit 1
+}
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+bundle="nickfarm27-pr-review"
+stage="$tmp_dir/$bundle"
+mkdir -p "$stage/bin" "$stage/plugins"
+cp "$PEER_ROOT/setup" "$PEER_ROOT/upgrade" "$PEER_ROOT/uninstall" "$PEER_ROOT/README.md" "$stage/"
+cp "$PEER_ROOT/bin/doctor" "$PEER_ROOT/bin/check-update" "$stage/bin/"
+cp -R "$PLUGIN_ROOT" "$stage/plugins/"
+mkdir -p "$OUTPUT_DIR"
+archive="$OUTPUT_DIR/$bundle-$VERSION.tar.gz"
+COPYFILE_DISABLE=1 tar -czf "$archive" -C "$tmp_dir" "$bundle"
+(cd "$OUTPUT_DIR" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+echo "$archive"

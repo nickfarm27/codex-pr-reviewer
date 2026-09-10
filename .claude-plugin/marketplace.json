@@ -1,0 +1,15 @@
+{
+  "name": "nickfarm27-tools",
+  "description": "Installable agent workflows maintained by nickfarm27.",
+  "owner": {
+    "name": "nickfarm27"
+  },
+  "plugins": [
+    {
+      "name": "nickfarm27-pr-review",
+      "source": "./peer/plugins/nickfarm27-pr-review",
+      "description": "Run Nicholas's high-signal, context-aware pull request review.",
+      "version": "0.1.0"
+    }
+  ]
+}

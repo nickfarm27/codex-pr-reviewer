@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -eu
+
+PEER_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPOSITORY="nickfarm27/codex-pr-reviewer"
+VERSION_FILE="$PEER_ROOT/plugins/nickfarm27-pr-review/VERSION"
+
+[ -f "$VERSION_FILE" ] || {
+  echo "Refusing to update an incomplete installation: $PEER_ROOT" >&2
+  exit 1
+}
+
+command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
+command -v gh >/dev/null 2>&1 || { echo "GitHub CLI is required" >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo "Run 'gh auth login' first" >&2; exit 1; }
+
+repo_root="$(git -C "$PEER_ROOT" rev-parse --show-toplevel 2>/dev/null || true)"
+origin=""
+if [ -n "$repo_root" ]; then
+  origin="$(git -C "$repo_root" remote get-url origin 2>/dev/null || true)"
+fi
+case "$origin" in
+  https://github.com/nickfarm27/codex-pr-reviewer|https://github.com/nickfarm27/codex-pr-reviewer.git|git@github.com:nickfarm27/codex-pr-reviewer.git)
+  if [ -n "$(git -C "$repo_root" status --porcelain --untracked-files=no)" ]; then
+    echo "Refusing to update a checkout with tracked local changes: $repo_root" >&2
+    exit 1
+  fi
+  git -C "$repo_root" fetch origin main
+  if [ "$(git -C "$repo_root" rev-list --count origin/main..HEAD)" -ne 0 ]; then
+    echo "Refusing to update a checkout with local commits: $repo_root" >&2
+    exit 1
+  fi
+  git -C "$repo_root" merge --ff-only origin/main
+  echo "Updated Nicholas PR Review from origin/main. Reload the agent before reviewing."
+  exit 0
+  ;;
+esac
+
+tag="$(gh release list --repo "$REPOSITORY" --limit 100 \
+  --json tagName,isDraft,isPrerelease \
+  --jq '[.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | startswith("peer-v")))][0].tagName')"
+[ -n "$tag" ] || { echo "No published peer release found" >&2; exit 1; }
+case "$tag" in
+  peer-v*) version="${tag#peer-v}" ;;
+  *) echo "Latest release '$tag' is not a peer release" >&2; exit 1 ;;
+esac
+
+archive="nickfarm27-pr-review-$version.tar.gz"
+checksum="$archive.sha256"
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+gh release download "$tag" --repo "$REPOSITORY" --pattern "$archive" --pattern "$checksum" --dir "$tmp_dir"
+(cd "$tmp_dir" && shasum -a 256 -c "$checksum")
+tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
+new_root="$tmp_dir/nickfarm27-pr-review"
+[ -x "$new_root/setup" ] || { echo "Downloaded release is incomplete" >&2; exit 1; }
+downloaded_version="$(tr -d '[:space:]' < "$new_root/plugins/nickfarm27-pr-review/VERSION" 2>/dev/null || true)"
+[ "$downloaded_version" = "$version" ] || {
+  echo "Downloaded release version does not match $tag" >&2
+  exit 1
+}
+
+parent="$(dirname "$PEER_ROOT")"
+stage="$parent/.nickfarm27-pr-review-new-$$"
+backup="$parent/.nickfarm27-pr-review-old-$$"
+mv "$new_root" "$stage"
+mv "$PEER_ROOT" "$backup"
+if mv "$stage" "$PEER_ROOT"; then
+  rm -rf "$backup"
+  echo "Updated Nicholas PR Review to $version. Reload the agent before reviewing."
+else
+  rm -rf "$PEER_ROOT"
+  mv "$backup" "$PEER_ROOT"
+  echo "Update failed; restored the previous installation." >&2
+  exit 1
+fi
