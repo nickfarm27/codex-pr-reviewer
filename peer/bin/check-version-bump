@@ -28,6 +28,8 @@ changed="$(git -C "$REPO_ROOT" diff --name-only "$BASE_REF"...HEAD -- \
   prompts/review-core.md \
   peer/README.md \
   peer/SETUP.md \
+  peer/INSTALL_PROMPT.md \
+  peer/install \
   peer/setup \
   peer/upgrade \
   peer/uninstall \

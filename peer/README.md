@@ -2,20 +2,36 @@
 
 Install Nicholas's private, report-only pull-request review workflow into Codex or Claude Code. The skill requires authenticated GitHub access and Linear's read-only MCP server, checks that its release is current before every review, and never writes to the reviewed repository or publishes a GitHub review.
 
-For a guided installation on a new machine, start with [SETUP.md](SETUP.md).
+## Install
+
+Most peers need one command:
+
+```sh
+/bin/bash <(curl -fsSL https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install) --host auto
+```
+
+The bootstrapper downloads and verifies the latest peer release, installs it at user scope, configures the read-only Linear MCP server, starts OAuth, and runs diagnostics. Use `--host codex` or `--host claude` for one client.
+
+There are three supported installation levels:
+
+1. **One command:** use the bootstrapper above.
+2. **Agent-assisted:** paste [INSTALL_PROMPT.md](INSTALL_PROMPT.md) into Codex or Claude Code.
+3. **Manual:** follow [SETUP.md](SETUP.md) to inspect and run every step yourself or configure another harness.
 
 ## Requirements
 
-- macOS or Linux with Git and Bash
+- macOS or Linux with Git, Bash, and curl
 - [GitHub CLI](https://cli.github.com/) authenticated with `gh auth login`
 - Codex, Claude Code, or both
 - Access to the Linear workspace containing the PR's related issue
 
-## Install from the repository
+## Manual alternatives
+
+Install from the repository:
 
 ```sh
 git clone --depth 1 https://github.com/nickfarm27/codex-pr-reviewer.git ~/.local/share/codex-pr-reviewer
-~/.local/share/codex-pr-reviewer/peer/setup --host auto
+~/.local/share/codex-pr-reviewer/peer/setup --host auto --skip-doctor
 ```
 
 Use `--host codex` or `--host claude` to install for one harness. The setup script creates safe user-level skill links and refuses to replace an existing file, directory, or foreign link with the same name.
@@ -44,7 +60,7 @@ claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/r
 
 Complete the OAuth flow in the relevant client. The skill proves access by reading the related Linear issue before it begins a review.
 
-## Install from a GitHub Release
+Or install from a GitHub Release:
 
 Each `peer-vX.Y.Z` release contains only this peer package and an SHA-256 checksum. Download both assets from the repository's Releases page, verify the checksum, extract the archive under `~/.local/share/`, and run `setup` from the extracted directory.
 
@@ -99,4 +115,4 @@ python3 -m unittest discover -s tests -v
 
 Pull-request CI requires a version bump whenever the shared review policy or release payload changes. Documentation and test-only changes outside `peer/` do not require one.
 
-Push a tag such as `peer-v0.1.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.
+Push a tag matching the current version, such as `peer-v0.2.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.

@@ -4,6 +4,32 @@ set -eu
 PEER_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPOSITORY="nickfarm27/codex-pr-reviewer"
 VERSION_FILE="$PEER_ROOT/plugins/nickfarm27-pr-review/VERSION"
+SKILL_SOURCE="$PEER_ROOT/plugins/nickfarm27-pr-review/skills/nickfarm27-pr-review"
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
+LEGACY_CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
+CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+RESTORE_CODEX_LINK=0
+RESTORE_CLAUDE_LINK=0
+
+link_points_to_skill() {
+  [ -L "$1" ] && [ "$(readlink "$1")" = "$SKILL_SOURCE" ]
+}
+if link_points_to_skill "$CODEX_SKILLS_DIR/nickfarm27-pr-review" || \
+   link_points_to_skill "$LEGACY_CODEX_SKILLS_DIR/nickfarm27-pr-review"; then
+  RESTORE_CODEX_LINK=1
+fi
+if link_points_to_skill "$CLAUDE_SKILLS_DIR/nickfarm27-pr-review"; then
+  RESTORE_CLAUDE_LINK=1
+fi
+
+refresh_owned_links() {
+  if [ "$RESTORE_CODEX_LINK" -eq 1 ]; then
+    "$PEER_ROOT/setup" --host codex --skip-doctor
+  fi
+  if [ "$RESTORE_CLAUDE_LINK" -eq 1 ]; then
+    "$PEER_ROOT/setup" --host claude --skip-doctor
+  fi
+}
 
 [ -f "$VERSION_FILE" ] || {
   echo "Refusing to update an incomplete installation: $PEER_ROOT" >&2
@@ -31,6 +57,7 @@ case "$origin" in
     exit 1
   fi
   git -C "$repo_root" merge --ff-only origin/main
+  refresh_owned_links
   echo "Updated Nicholas PR Review from origin/main. Reload the agent before reviewing."
   exit 0
   ;;
@@ -68,6 +95,7 @@ mv "$new_root" "$stage"
 mv "$PEER_ROOT" "$backup"
 if mv "$stage" "$PEER_ROOT"; then
   rm -rf "$backup"
+  refresh_owned_links
   echo "Updated Nicholas PR Review to $version. Reload the agent before reviewing."
 else
   rm -rf "$PEER_ROOT"

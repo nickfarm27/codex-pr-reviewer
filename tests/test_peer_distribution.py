@@ -105,20 +105,40 @@ class PeerDistributionTests(unittest.TestCase):
             self.run_script(PEER / "uninstall", "--host", "codex", env=env)
             self.assertFalse(installed.exists())
 
-    def test_codex_install_uses_codex_home_skills_directory(self) -> None:
+    def test_codex_install_uses_global_agents_skills_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            codex_home = Path(temporary) / "codex-home"
+            user_home = Path(temporary) / "home"
             self.run_script(
                 PEER / "setup",
                 "--host",
                 "codex",
                 "--skip-doctor",
-                env={"CODEX_HOME": str(codex_home)},
+                env={
+                    "HOME": str(user_home),
+                    "CODEX_HOME": str(user_home / ".codex"),
+                },
             )
 
-            installed = codex_home / "skills" / "nickfarm27-pr-review"
+            installed = user_home / ".agents" / "skills" / "nickfarm27-pr-review"
             self.assertTrue(installed.is_symlink())
             self.assertEqual(Path(os.readlink(installed)), SKILL)
+
+    def test_codex_setup_migrates_its_owned_legacy_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            user_home = Path(temporary) / "home"
+            legacy = user_home / ".codex" / "skills" / "nickfarm27-pr-review"
+            legacy.parent.mkdir(parents=True)
+            legacy.symlink_to(SKILL)
+            env = {
+                "HOME": str(user_home),
+                "CODEX_HOME": str(user_home / ".codex"),
+            }
+
+            self.run_script(PEER / "setup", "--host", "codex", "--skip-doctor", env=env)
+
+            installed = user_home / ".agents" / "skills" / "nickfarm27-pr-review"
+            self.assertTrue(installed.is_symlink())
+            self.assertFalse(legacy.exists())
 
     def test_setup_refuses_to_overwrite_an_existing_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -209,6 +229,94 @@ class PeerDistributionTests(unittest.TestCase):
             )
             self.assertEqual(stale.returncode, 10)
             self.assertIn("not current", stale.stderr)
+
+    def test_bootstrap_installs_configures_and_verifies_latest_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            fake_bin = root / "bin"
+            agent_state = root / "agent-state"
+            install_root = root / "installed" / "nickfarm27-pr-review"
+            skills_dir = root / "skills"
+            release_dir.mkdir()
+            fake_bin.mkdir()
+            agent_state.mkdir()
+            self.run_script(PEER / "bin" / "package-release", str(release_dir))
+
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = list ]; then printf 'peer-v%s\\n' \"$FAKE_PEER_VERSION\"; exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = download ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --dir ]; then shift; destination=\"$1\"; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  cp \"$FAKE_RELEASE_DIR\"/* \"$destination/\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = get ]; then\n"
+                "  [ -f \"$FAKE_AGENT_STATE/linear\" ] || exit 1\n"
+                "  printf 'url: https://mcp.linear.app/mcp/readonly\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = add ]; then touch \"$FAKE_AGENT_STATE/linear\"; exit 0; fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = login ]; then touch \"$FAKE_AGENT_STATE/login\"; exit 0; fi\n"
+                "exit 1\n"
+            )
+            fake_codex.chmod(0o755)
+
+            version = (PLUGIN / "VERSION").read_text().strip()
+            env = {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_PEER_VERSION": version,
+                "FAKE_RELEASE_DIR": str(release_dir),
+                "FAKE_AGENT_STATE": str(agent_state),
+                "NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR": str(skills_dir),
+            }
+            first = self.run_script(
+                PEER / "install",
+                "--host",
+                "codex",
+                "--install-dir",
+                str(install_root),
+                env=env,
+            )
+            second = self.run_script(
+                PEER / "install",
+                "--host",
+                "codex",
+                "--install-dir",
+                str(install_root),
+                env=env,
+            )
+
+            self.assertEqual(
+                (install_root / "plugins" / "nickfarm27-pr-review" / "VERSION").read_text().strip(),
+                version,
+            )
+            installed_skill = skills_dir / "nickfarm27-pr-review"
+            self.assertTrue(installed_skill.is_symlink())
+            self.assertEqual(
+                Path(os.readlink(installed_skill)),
+                install_root
+                / "plugins"
+                / "nickfarm27-pr-review"
+                / "skills"
+                / "nickfarm27-pr-review",
+            )
+            self.assertTrue((agent_state / "linear").is_file())
+            self.assertTrue((agent_state / "login").is_file())
+            self.assertIn("is ready", first.stdout)
+            self.assertIn(f"{version} is already downloaded", second.stdout)
 
     def test_peer_runtime_changes_require_a_version_bump(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -308,7 +416,10 @@ class PeerDistributionTests(unittest.TestCase):
             )
             self.assertIn("nickfarm27-pr-review/setup", names)
             self.assertTrue(members["nickfarm27-pr-review/setup"].mode & 0o111)
+            self.assertIn("nickfarm27-pr-review/install", names)
+            self.assertTrue(members["nickfarm27-pr-review/install"].mode & 0o111)
             self.assertIn("nickfarm27-pr-review/SETUP.md", names)
+            self.assertIn("nickfarm27-pr-review/INSTALL_PROMPT.md", names)
             self.assertTrue(
                 any(name.endswith("/skills/nickfarm27-pr-review/SKILL.md") for name in names)
             )
