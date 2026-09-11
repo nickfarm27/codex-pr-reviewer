@@ -10,7 +10,7 @@ Most peers need one command:
 /bin/bash <(curl -fsSL https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install) --host auto
 ```
 
-The bootstrapper downloads and verifies the latest peer release, installs it at user scope, configures the read-only Linear MCP server, starts OAuth, and runs diagnostics. Use `--host codex` or `--host claude` for one client.
+The bootstrapper downloads and verifies the latest peer release, installs it at user scope, configures the namespaced read-only Linear MCP server, starts OAuth only when adding that server, and runs diagnostics. Existing Linear connectors keep their current permissions. Use `--host codex` or `--host claude` for one client.
 
 There are three supported installation levels:
 
@@ -54,11 +54,11 @@ This installs the portable core only. The harness must be able to run local shel
 Connect Linear if setup reports that it is missing:
 
 ```sh
-codex mcp add linear --url https://mcp.linear.app/mcp/readonly
-claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/readonly
+codex mcp add nickfarm27-linear-readonly --url https://mcp.linear.app/mcp/readonly
+claude mcp add --scope user --transport http nickfarm27-linear-readonly https://mcp.linear.app/mcp/readonly
 ```
 
-Complete the OAuth flow in the relevant client. The skill proves access by reading the related Linear issue before it begins a review.
+Complete the OAuth flow in the relevant client. Codex starts it automatically from `mcp add`; Claude uses `claude mcp login nickfarm27-linear-readonly`. The skill uses only this namespaced read-only server and proves access by reading the related Linear issue before it begins a review.
 
 Or install from a GitHub Release:
 
@@ -115,4 +115,4 @@ python3 -m unittest discover -s tests -v
 
 Pull-request CI requires a version bump whenever the shared review policy or release payload changes. Documentation and test-only changes outside `peer/` do not require one.
 
-Push a tag matching the current version, such as `peer-v0.2.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.
+Push a tag matching the current version, such as `peer-v0.3.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.

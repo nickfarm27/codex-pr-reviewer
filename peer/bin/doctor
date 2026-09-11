@@ -7,13 +7,15 @@ SKILL_SOURCE="$PEER_ROOT/plugins/nickfarm27-pr-review/skills/nickfarm27-pr-revie
 HOST="auto"
 CUSTOM_SKILLS_DIR=""
 CHECK_REMOTE=1
+ALLOW_PENDING_LINEAR=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --host) [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }; HOST="$2"; shift 2 ;;
     --skills-dir) [ "$#" -ge 2 ] || { echo "Missing value for --skills-dir" >&2; exit 2; }; CUSTOM_SKILLS_DIR="$2"; shift 2 ;;
     --offline) CHECK_REMOTE=0; shift ;;
-    *) echo "Usage: doctor [--host auto|codex|claude|custom] [--skills-dir PATH] [--offline]" >&2; exit 2 ;;
+    --allow-pending-linear) ALLOW_PENDING_LINEAR=1; shift ;;
+    *) echo "Usage: doctor [--host auto|codex|claude|custom] [--skills-dir PATH] [--offline] [--allow-pending-linear]" >&2; exit 2 ;;
   esac
 done
 
@@ -33,6 +35,7 @@ fi
 
 CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+LINEAR_SERVER="nickfarm27-linear-readonly"
 LINEAR_URL="https://mcp.linear.app/mcp/readonly"
 check_link() {
   host_name="$1"
@@ -50,11 +53,22 @@ check_linear() {
     fail "$client is required for this installation"
     return
   }
-  details="$("$client" mcp get linear 2>/dev/null || true)"
-  if printf '%s\n' "$details" | grep -F "$LINEAR_URL" >/dev/null 2>&1; then
-    pass "$client Linear MCP endpoint is configured"
+  if details="$("$client" mcp get "$LINEAR_SERVER" 2>/dev/null)"; then
+    if printf '%s\n' "$details" | grep -F "$LINEAR_URL" >/dev/null 2>&1; then
+      pass "$client namespaced Linear MCP uses the read-only endpoint"
+    else
+      fail "$client MCP server '$LINEAR_SERVER' uses another URL"
+    fi
+    return
+  fi
+  if legacy_details="$("$client" mcp get linear 2>/dev/null)" && \
+     printf '%s\n' "$legacy_details" | grep -F "$LINEAR_URL" >/dev/null 2>&1; then
+    pass "$client legacy Linear MCP still uses the read-only endpoint"
+    note "Re-run the one-command installer to migrate it to '$LINEAR_SERVER'."
+  elif [ "$ALLOW_PENDING_LINEAR" -eq 1 ]; then
+    note "$client namespaced read-only Linear MCP is pending interactive setup"
   else
-    fail "$client Linear MCP endpoint is missing or uses another URL"
+    fail "$client MCP server '$LINEAR_SERVER' is missing or uses another URL"
   fi
 }
 
@@ -78,6 +92,7 @@ case "$HOST" in
 esac
 [ "$checked_links" -eq 1 ] || fail "No installed Nicholas PR Review skill link was found"
 
+note "The skill uses only '$LINEAR_SERVER'; other Linear connections keep their existing access."
 note "Linear authentication is finally verified at invocation by reading the related issue."
 
 if [ "$CHECK_REMOTE" -eq 1 ]; then

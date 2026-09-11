@@ -1,6 +1,6 @@
 {
   "name": "nickfarm27-pr-review",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run Nicholas's high-signal, context-aware pull request review.",
   "author": {
     "name": "nickfarm27",
@@ -13,7 +13,7 @@
   "interface": {
     "displayName": "Nicholas PR Review",
     "shortDescription": "Run Nicholas's high-signal PR review.",
-    "longDescription": "Review a GitHub pull request with required Linear context, a bounded code-reading radius, and Nicholas's high-signal finding gates. The workflow is private and report-only.",
+    "longDescription": "Review a GitHub pull request with required read-only Linear context, a bounded code-reading radius, and Nicholas's high-signal finding gates. The workflow is private and report-only.",
     "developerName": "nickfarm27",
     "category": "Productivity",
     "capabilities": ["Read"],

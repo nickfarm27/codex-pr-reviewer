@@ -86,6 +86,21 @@ class PeerDistributionTests(unittest.TestCase):
         self.assertIsNotNone(skill_version)
         self.assertEqual(skill_version.group(1), version)
 
+    def test_skill_is_bound_to_the_namespaced_readonly_linear_server(self) -> None:
+        server_name = "nickfarm27-linear-readonly"
+        readonly_url = "https://mcp.linear.app/mcp/readonly"
+        mcp = json.loads((PLUGIN / ".mcp.json").read_text())
+        openai_metadata = (SKILL / "agents" / "openai.yaml").read_text()
+        skill_text = (SKILL / "SKILL.md").read_text()
+
+        self.assertEqual(list(mcp["mcpServers"]), [server_name])
+        self.assertEqual(mcp["mcpServers"][server_name]["url"], readonly_url)
+        self.assertIn(f'value: "{server_name}"', openai_metadata)
+        self.assertIn(f'url: "{readonly_url}"', openai_metadata)
+        self.assertIn(f"MCP server named `{server_name}`", skill_text)
+        self.assertIn("Never substitute any other Linear connector", skill_text)
+        self.assertIn("For compatibility with release `0.2.0`", skill_text)
+
     def test_setup_is_idempotent_and_uninstall_removes_only_owned_link(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -202,6 +217,52 @@ class PeerDistributionTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("No installed Nicholas PR Review skill link", result.stderr)
 
+    def test_doctor_accepts_the_legacy_readonly_linear_server(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            skills_dir = root / "skills"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = get ] && [ \"$3\" = linear ]; then\n"
+                "  printf 'url: https://mcp.linear.app/mcp/readonly\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR": str(skills_dir),
+            }
+            self.run_script(
+                PEER / "setup",
+                "--host",
+                "codex",
+                "--skip-doctor",
+                env=env,
+            )
+
+            result = self.run_script(
+                PEER / "bin" / "doctor",
+                "--host",
+                "codex",
+                "--offline",
+                env=env,
+            )
+
+            self.assertIn("legacy Linear MCP still uses the read-only endpoint", result.stdout)
+            self.assertIn("Re-run the one-command installer", result.stdout)
+
     def test_update_check_fails_closed_when_release_differs(self) -> None:
         current = (PLUGIN / "VERSION").read_text().strip()
         with tempfile.TemporaryDirectory() as temporary:
@@ -263,13 +324,20 @@ class PeerDistributionTests(unittest.TestCase):
             fake_codex = fake_bin / "codex"
             fake_codex.write_text(
                 "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_AGENT_STATE/calls\"\n"
                 "if [ \"$1\" = mcp ] && [ \"$2\" = get ]; then\n"
-                "  [ -f \"$FAKE_AGENT_STATE/linear\" ] || exit 1\n"
+                "  [ \"$3\" = nickfarm27-linear-readonly ] || exit 1\n"
+                "  [ -f \"$FAKE_AGENT_STATE/nickfarm27-linear-readonly\" ] || exit 1\n"
                 "  printf 'url: https://mcp.linear.app/mcp/readonly\\n'\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [ \"$1\" = mcp ] && [ \"$2\" = add ]; then touch \"$FAKE_AGENT_STATE/linear\"; exit 0; fi\n"
-                "if [ \"$1\" = mcp ] && [ \"$2\" = login ]; then touch \"$FAKE_AGENT_STATE/login\"; exit 0; fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = add ]; then\n"
+                "  [ \"$3\" = nickfarm27-linear-readonly ] || exit 1\n"
+                "  touch \"$FAKE_AGENT_STATE/nickfarm27-linear-readonly\"\n"
+                "  touch \"$FAKE_AGENT_STATE/automatic-login\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = login ]; then touch \"$FAKE_AGENT_STATE/explicit-login\"; exit 0; fi\n"
                 "exit 1\n"
             )
             fake_codex.chmod(0o755)
@@ -281,6 +349,7 @@ class PeerDistributionTests(unittest.TestCase):
                 "FAKE_RELEASE_DIR": str(release_dir),
                 "FAKE_AGENT_STATE": str(agent_state),
                 "NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR": str(skills_dir),
+                "NICKFARM27_PR_REVIEW_INTERACTIVE": "1",
             }
             first = self.run_script(
                 PEER / "install",
@@ -313,10 +382,201 @@ class PeerDistributionTests(unittest.TestCase):
                 / "skills"
                 / "nickfarm27-pr-review",
             )
-            self.assertTrue((agent_state / "linear").is_file())
-            self.assertTrue((agent_state / "login").is_file())
+            self.assertTrue((agent_state / "nickfarm27-linear-readonly").is_file())
+            self.assertTrue((agent_state / "automatic-login").is_file())
+            self.assertFalse((agent_state / "explicit-login").exists())
+            calls = (agent_state / "calls").read_text().splitlines()
+            add_calls = [call for call in calls if call.startswith("mcp add ")]
+            login_calls = [call for call in calls if call.startswith("mcp login ")]
+            self.assertEqual(len(add_calls), 1)
+            self.assertEqual(login_calls, [])
             self.assertIn("is ready", first.stdout)
             self.assertIn(f"{version} is already downloaded", second.stdout)
+            self.assertIn("leaving its OAuth state unchanged", second.stdout)
+
+    def test_bootstrap_logs_in_to_new_claude_server_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            fake_bin = root / "bin"
+            agent_state = root / "agent-state"
+            install_root = root / "installed" / "nickfarm27-pr-review"
+            skills_dir = root / "skills"
+            release_dir.mkdir()
+            fake_bin.mkdir()
+            agent_state.mkdir()
+            self.run_script(PEER / "bin" / "package-release", str(release_dir))
+
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = list ]; then printf 'peer-v%s\\n' \"$FAKE_PEER_VERSION\"; exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = download ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --dir ]; then shift; destination=\"$1\"; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  cp \"$FAKE_RELEASE_DIR\"/* \"$destination/\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+
+            fake_claude = fake_bin / "claude"
+            fake_claude.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_AGENT_STATE/calls\"\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = get ]; then\n"
+                "  [ \"$3\" = nickfarm27-linear-readonly ] || exit 1\n"
+                "  [ -f \"$FAKE_AGENT_STATE/server\" ] || exit 1\n"
+                "  printf 'URL: https://mcp.linear.app/mcp/readonly\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = add ]; then touch \"$FAKE_AGENT_STATE/server\"; exit 0; fi\n"
+                "if [ \"$1\" = mcp ] && [ \"$2\" = login ]; then touch \"$FAKE_AGENT_STATE/login\"; exit 0; fi\n"
+                "exit 1\n"
+            )
+            fake_claude.chmod(0o755)
+
+            version = (PLUGIN / "VERSION").read_text().strip()
+            env = {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "FAKE_PEER_VERSION": version,
+                "FAKE_RELEASE_DIR": str(release_dir),
+                "FAKE_AGENT_STATE": str(agent_state),
+                "NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR": str(skills_dir),
+                "NICKFARM27_PR_REVIEW_INTERACTIVE": "1",
+            }
+            self.run_script(
+                PEER / "install",
+                "--host",
+                "claude",
+                "--install-dir",
+                str(install_root),
+                env=env,
+            )
+            second = self.run_script(
+                PEER / "install",
+                "--host",
+                "claude",
+                "--install-dir",
+                str(install_root),
+                env=env,
+            )
+
+            calls = (agent_state / "calls").read_text().splitlines()
+            self.assertEqual(len([call for call in calls if call.startswith("mcp add ")]), 1)
+            self.assertEqual(len([call for call in calls if call.startswith("mcp login ")]), 1)
+            self.assertIn("leaving its OAuth state unchanged", second.stdout)
+
+    def test_skip_oauth_defers_codex_mcp_add(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            fake_bin = root / "bin"
+            agent_state = root / "agent-state"
+            install_root = root / "installed" / "nickfarm27-pr-review"
+            skills_dir = root / "skills"
+            release_dir.mkdir()
+            fake_bin.mkdir()
+            agent_state.mkdir()
+            self.run_script(PEER / "bin" / "package-release", str(release_dir))
+
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = list ]; then printf 'peer-v%s\\n' \"$FAKE_PEER_VERSION\"; exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = download ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --dir ]; then shift; destination=\"$1\"; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  cp \"$FAKE_RELEASE_DIR\"/* \"$destination/\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+
+            fake_codex = fake_bin / "codex"
+            fake_codex.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"$*\" >> \"$FAKE_AGENT_STATE/calls\"\n"
+                "exit 1\n"
+            )
+            fake_codex.chmod(0o755)
+
+            version = (PLUGIN / "VERSION").read_text().strip()
+            result = self.run_script(
+                PEER / "install",
+                "--host",
+                "codex",
+                "--install-dir",
+                str(install_root),
+                "--skip-oauth",
+                env={
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_PEER_VERSION": version,
+                    "FAKE_RELEASE_DIR": str(release_dir),
+                    "FAKE_AGENT_STATE": str(agent_state),
+                    "NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR": str(skills_dir),
+                },
+            )
+
+            calls = (agent_state / "calls").read_text().splitlines()
+            self.assertEqual(len([call for call in calls if call.startswith("mcp add ")]), 0)
+            self.assertEqual(len([call for call in calls if call.startswith("mcp login ")]), 0)
+            self.assertIn("Linear setup deferred", result.stdout)
+            self.assertIn("Linear OAuth is still required", result.stdout)
+
+    def test_bootstrap_custom_host_prints_the_readonly_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            release_dir = root / "release"
+            fake_bin = root / "bin"
+            install_root = root / "installed" / "nickfarm27-pr-review"
+            skills_dir = root / "skills"
+            release_dir.mkdir()
+            fake_bin.mkdir()
+            self.run_script(PEER / "bin" / "package-release", str(release_dir))
+
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ] && [ \"$2\" = status ]; then exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = list ]; then printf 'peer-v%s\\n' \"$FAKE_PEER_VERSION\"; exit 0; fi\n"
+                "if [ \"$1\" = release ] && [ \"$2\" = download ]; then\n"
+                "  while [ \"$#\" -gt 0 ]; do\n"
+                "    if [ \"$1\" = --dir ]; then shift; destination=\"$1\"; fi\n"
+                "    shift\n"
+                "  done\n"
+                "  cp \"$FAKE_RELEASE_DIR\"/* \"$destination/\"\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+
+            version = (PLUGIN / "VERSION").read_text().strip()
+            result = self.run_script(
+                PEER / "install",
+                "--host",
+                "custom",
+                "--skills-dir",
+                str(skills_dir),
+                "--install-dir",
+                str(install_root),
+                env={
+                    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                    "FAKE_PEER_VERSION": version,
+                    "FAKE_RELEASE_DIR": str(release_dir),
+                },
+            )
+
+            self.assertIn("https://mcp.linear.app/mcp/readonly", result.stdout)
 
     def test_peer_runtime_changes_require_a_version_bump(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -418,6 +678,10 @@ class PeerDistributionTests(unittest.TestCase):
             self.assertTrue(members["nickfarm27-pr-review/setup"].mode & 0o111)
             self.assertIn("nickfarm27-pr-review/install", names)
             self.assertTrue(members["nickfarm27-pr-review/install"].mode & 0o111)
+            self.assertIn("nickfarm27-pr-review/bin/configure-linear", names)
+            self.assertTrue(
+                members["nickfarm27-pr-review/bin/configure-linear"].mode & 0o111
+            )
             self.assertIn("nickfarm27-pr-review/SETUP.md", names)
             self.assertIn("nickfarm27-pr-review/INSTALL_PROMPT.md", names)
             self.assertTrue(

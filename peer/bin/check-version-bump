@@ -34,6 +34,7 @@ changed="$(git -C "$REPO_ROOT" diff --name-only "$BASE_REF"...HEAD -- \
   peer/upgrade \
   peer/uninstall \
   peer/bin/check-update \
+  peer/bin/configure-linear \
   peer/bin/doctor \
   peer/plugins/nickfarm27-pr-review)"
 [ -n "$changed" ] || {

@@ -8,7 +8,7 @@ Install Nicholas PR Review globally for every supported agent detected on this m
 First inspect the installer at:
 https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install
 
-If it only downloads and verifies the latest peer-v* release, installs under my user account, configures the read-only Linear MCP endpoint, and runs diagnostics, execute:
+If it only downloads and verifies the latest peer-v* release, installs under my user account, configures the namespaced read-only Linear MCP endpoint without replacing existing Linear connections, starts OAuth only when that server is new, and runs diagnostics, execute:
 
 /bin/bash <(curl -fsSL https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install) --host auto
 

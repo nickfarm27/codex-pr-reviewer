@@ -6,7 +6,7 @@ interface:
 dependencies:
   tools:
     - type: "mcp"
-      value: "linear"
+      value: "nickfarm27-linear-readonly"
       description: "Read-only Linear context for linked issues and projects"
       transport: "streamable_http"
       url: "https://mcp.linear.app/mcp/readonly"

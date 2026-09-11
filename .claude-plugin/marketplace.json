@@ -9,7 +9,7 @@
       "name": "nickfarm27-pr-review",
       "source": "./peer/plugins/nickfarm27-pr-review",
       "description": "Run Nicholas's high-signal, context-aware pull request review.",
-      "version": "0.2.0"
+      "version": "0.3.0"
     }
   ]
 }
