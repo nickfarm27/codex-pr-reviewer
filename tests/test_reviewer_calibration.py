@@ -132,7 +132,7 @@ class CalibrationTests(unittest.TestCase):
         ).fetchone()
         migrated.close()
 
-        self.assertEqual(version, "3")
+        self.assertEqual(version, "4")
         self.assertEqual(review_count, 1)
         self.assertIsNotNone(calibration_table)
 

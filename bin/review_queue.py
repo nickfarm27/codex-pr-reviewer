@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "config.json"
 DEFAULT_STATE = ROOT / ".state" / "reviews.db"
 LEGACY_STATE = ROOT / ".state" / "reviews.json"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_PR_BODY_CHARS = 12_000
 ACTIVE_STATUSES = {"claimed", "dispatched", "preparing", "reviewing"}
 FINDING_STATUSES = {
@@ -195,7 +195,7 @@ def pr_details(url: str) -> dict[str, Any]:
             "pr",
             "view",
             url,
-            "--json=number,title,body,url,isDraft,author,headRefOid,headRefName,baseRefName,reviewRequests,mergeable,statusCheckRollup,labels,changedFiles,additions,deletions",
+            "--json=number,title,body,url,state,isDraft,author,headRefOid,headRefName,baseRefName,reviewRequests,mergeable,statusCheckRollup,labels,changedFiles,additions,deletions",
         ]
     )
 
@@ -379,6 +379,7 @@ def connect_state(path: Path, *, import_legacy: bool = True) -> sqlite3.Connecti
             kind TEXT NOT NULL DEFAULT 'defect',
             added_after_completion INTEGER NOT NULL DEFAULT 0,
             source_note TEXT,
+            origin_finding_id INTEGER REFERENCES findings(id) ON DELETE SET NULL,
             status TEXT NOT NULL DEFAULT 'proposed',
             decision_note TEXT,
             created_at TEXT NOT NULL,
@@ -538,6 +539,17 @@ def migrate_schema(connection: sqlite3.Connection, version: int) -> None:
             # migration. Advancing the version records that the additive schema is
             # available without rewriting any review lifecycle data.
             version = 3
+        if version == 3:
+            existing_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(findings)").fetchall()
+            }
+            if "origin_finding_id" not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE findings ADD COLUMN origin_finding_id "
+                    "INTEGER REFERENCES findings(id) ON DELETE SET NULL"
+                )
+            version = 4
         if version != SCHEMA_VERSION:
             raise QueueError(
                 f"No migration path from schema {version} to {SCHEMA_VERSION}"
@@ -934,6 +946,34 @@ def claimed_candidate(state_path: Path, key: str) -> dict[str, Any]:
         connection.close()
 
 
+def active_carried_findings(
+    connection: sqlite3.Connection,
+    pull_request_id: int,
+    current_review_id: int,
+) -> list[sqlite3.Row]:
+    """Return the latest active snapshot of each finding lineage."""
+    return connection.execute(
+        """
+        WITH ranked AS (
+            SELECT rr.claim_key, rr.id AS source_round_id, f.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY COALESCE(f.origin_finding_id, f.id)
+                       ORDER BY rr.completed_at DESC, rr.id DESC, f.id DESC
+                   ) AS lineage_rank
+            FROM findings f
+            JOIN review_rounds rr ON rr.id = f.review_round_id
+            WHERE rr.pull_request_id = ? AND rr.id != ?
+              AND rr.status = 'completed'
+        )
+        SELECT * FROM ranked
+        WHERE lineage_rank = 1
+          AND status IN ('accepted', 'drafted', 'submitted', 'still_open')
+        ORDER BY source_round_id, id
+        """,
+        (pull_request_id, current_review_id),
+    ).fetchall()
+
+
 def previous_review_context(state_path: Path, key: str) -> dict[str, Any] | None:
     connection = connect_state(state_path)
     try:
@@ -954,22 +994,9 @@ def previous_review_context(state_path: Path, key: str) -> dict[str, Any] | None
             return None
         findings = [
             dict(row)
-            for row in connection.execute(
-                """
-                SELECT rr.claim_key, f.finding_key, f.severity, f.title, f.path,
-                       f.start_line, f.end_line, f.explanation,
-                       f.failure_example, f.safeguard, f.safeguard_kind,
-                       f.review_comment, f.source, f.kind,
-                       f.added_after_completion, f.source_note,
-                       f.status, f.decision_note
-                FROM findings f
-                JOIN review_rounds rr ON rr.id = f.review_round_id
-                WHERE rr.pull_request_id = ? AND rr.id != ?
-                  AND f.status IN ('accepted', 'drafted', 'submitted', 'still_open')
-                ORDER BY rr.id, f.id
-                """,
-                (current["pull_request_id"], current["id"]),
-            ).fetchall()
+            for row in active_carried_findings(
+                connection, current["pull_request_id"], current["id"]
+            )
         ]
         github_review = connection.execute(
             """
@@ -1022,6 +1049,152 @@ def prepare_claimed_candidate(
         checkout_path=str(destination),
     )
     return candidate
+
+
+def prepare_rereview(
+    config: dict[str, Any],
+    state_path: Path,
+    repository: str,
+    number: int,
+) -> dict[str, Any]:
+    """Create and prepare a user-triggered round for a PR's current head."""
+    connection = connect_state(state_path)
+    try:
+        pull_request = connection.execute(
+            "SELECT * FROM pull_requests WHERE repository = ? AND number = ?",
+            (repository, number),
+        ).fetchone()
+        if pull_request is None:
+            raise QueueError(
+                f"PR is not bound to a continuing review task: {repository}#{number}"
+            )
+        if not pull_request["task_thread_id"]:
+            raise QueueError(
+                f"PR has no continuing review task: {repository}#{number}"
+            )
+        url = pull_request["url"]
+        remembered_issue_ids = json.loads(
+            pull_request["linear_issue_ids_json"] or "[]"
+        )
+    finally:
+        connection.close()
+
+    details = pr_details(url)
+    if details.get("number") != number:
+        raise QueueError(
+            f"GitHub returned PR #{details.get('number')} for requested PR #{number}"
+        )
+    if details.get("state") not in {None, "OPEN"}:
+        raise QueueError(f"PR is not open: {repository}#{number}")
+    if details.get("isDraft"):
+        raise QueueError(f"Draft PRs cannot be re-reviewed: {repository}#{number}")
+
+    timestamp = isoformat()
+    connection = connect_state(state_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        pull_request = connection.execute(
+            "SELECT * FROM pull_requests WHERE repository = ? AND number = ?",
+            (repository, number),
+        ).fetchone()
+        assert pull_request is not None
+        active = connection.execute(
+            f"""
+            SELECT claim_key FROM review_rounds
+            WHERE pull_request_id = ?
+              AND status IN ({','.join('?' for _ in ACTIVE_STATUSES)})
+            ORDER BY id DESC LIMIT 1
+            """,
+            (pull_request["id"], *sorted(ACTIVE_STATUSES)),
+        ).fetchone()
+        if active:
+            raise QueueError(
+                "This PR already has an active review round: "
+                f"{active['claim_key']}"
+            )
+
+        sequence = connection.execute(
+            """
+            SELECT COUNT(*) AS count FROM review_rounds
+            WHERE pull_request_id = ? AND claim_key LIKE '%~rereview-%'
+            """,
+            (pull_request["id"],),
+        ).fetchone()["count"] + 1
+        head_sha = details["headRefOid"]
+        key = f"{repository}#{number}@{head_sha}~rereview-{sequence}"
+        issue_ids = extract_linear_issue_ids(
+            details.get("title"), details.get("body"), details.get("headRefName")
+        ) or remembered_issue_ids
+        author = details.get("author") or {}
+        candidate = {
+            "repository": repository,
+            "number": number,
+            "title": details["title"],
+            "body": (details.get("body") or "")[:MAX_PR_BODY_CHARS],
+            "body_truncated": len(details.get("body") or "") > MAX_PR_BODY_CHARS,
+            "url": details["url"],
+            "author": author.get("login") if isinstance(author, dict) else author,
+            "base_ref": details["baseRefName"],
+            "head_ref": details["headRefName"],
+            "head_sha": head_sha,
+            "key": key,
+            "review_request_event_id": None,
+            "review_requested_at": timestamp,
+            "review_trigger": "user_rereview",
+            "rereview_id": sequence,
+            "updated_at": timestamp,
+            "mergeable": details.get("mergeable"),
+            "checks": details.get("statusCheckRollup", []),
+            "labels": [
+                label.get("name")
+                for label in details.get("labels", [])
+                if label.get("name")
+            ],
+            "changed_files": details.get("changedFiles"),
+            "additions": details.get("additions"),
+            "deletions": details.get("deletions"),
+            "linear_issue_ids": issue_ids,
+        }
+        upsert_pull_request(connection, candidate)
+        connection.execute(
+            """
+            INSERT INTO review_rounds(
+                pull_request_id, claim_key, head_sha, base_ref, head_ref,
+                review_requested_at, status, claimed_at, dispatched_at,
+                updated_at, candidate_json
+            ) VALUES (?, ?, ?, ?, ?, ?, 'dispatched', ?, ?, ?, ?)
+            """,
+            (
+                pull_request["id"],
+                key,
+                head_sha,
+                candidate.get("base_ref"),
+                candidate.get("head_ref"),
+                timestamp,
+                timestamp,
+                timestamp,
+                timestamp,
+                json.dumps(candidate, sort_keys=True),
+            ),
+        )
+        review = connection.execute(
+            "SELECT id FROM review_rounds WHERE claim_key = ?", (key,)
+        ).fetchone()
+        record_event(
+            connection,
+            "user_rereview_started",
+            pull_request_id=pull_request["id"],
+            review_round_id=review["id"],
+            payload={"head_sha": head_sha, "rereview_id": sequence},
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+    return prepare_claimed_candidate(config, state_path, key)
 
 
 def prepare_related_pr(url: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -1424,17 +1597,11 @@ def complete_review(
         if len(disposition_pairs) != len(set(disposition_pairs)):
             raise QueueError("Previous finding dispositions must be unique")
 
+        carried_rows = active_carried_findings(
+            connection, review["pull_request_id"], review["id"]
+        )
         carried_pairs = {
-            (row["claim_key"], row["finding_key"])
-            for row in connection.execute(
-                """
-                SELECT rr.claim_key, f.finding_key FROM findings f
-                JOIN review_rounds rr ON rr.id = f.review_round_id
-                WHERE rr.pull_request_id = ? AND rr.id != ?
-                  AND f.status IN ('accepted', 'drafted', 'submitted', 'still_open')
-                """,
-                (review["pull_request_id"], review["id"]),
-            ).fetchall()
+            (row["claim_key"], row["finding_key"]) for row in carried_rows
         }
         provided_pairs = set(disposition_pairs)
         if provided_pairs != carried_pairs:
@@ -1477,6 +1644,10 @@ def complete_review(
                 ),
             )
 
+        carried_by_pair = {
+            (row["claim_key"], row["finding_key"]): row for row in carried_rows
+        }
+        carried_into_round: list[dict[str, str]] = []
         for disposition in document["previous_findings"]:
             status = disposition.get("status")
             if status not in {"resolved", "still_open", "obsolete"}:
@@ -1502,6 +1673,101 @@ def complete_review(
                 """,
                 (status, disposition.get("note"), timestamp, source["id"]),
             )
+            if status == "still_open":
+                source_finding = carried_by_pair[(source_key, finding_key)]
+                origin_id = (
+                    source_finding["origin_finding_id"] or source_finding["id"]
+                )
+                current_match = connection.execute(
+                    """
+                    SELECT * FROM findings
+                    WHERE review_round_id = ?
+                      AND (origin_finding_id = ? OR fingerprint = ?)
+                    ORDER BY id LIMIT 1
+                    """,
+                    (review["id"], origin_id, source_finding["fingerprint"]),
+                ).fetchone()
+                if current_match is None:
+                    used_keys = {
+                        row["finding_key"]
+                        for row in connection.execute(
+                            "SELECT finding_key FROM findings WHERE review_round_id = ?",
+                            (review["id"],),
+                        ).fetchall()
+                    }
+                    carried_key = source_finding["finding_key"]
+                    if carried_key in used_keys:
+                        prefix = (
+                            carried_key[0]
+                            if carried_key[:1] in {"F", "U"}
+                            else "F"
+                        )
+                        sequence = 1
+                        while f"{prefix}-{sequence:02d}" in used_keys:
+                            sequence += 1
+                        carried_key = f"{prefix}-{sequence:02d}"
+                    connection.execute(
+                        """
+                        INSERT INTO findings(
+                            review_round_id, finding_key, severity, title, path,
+                            start_line, end_line, explanation, failure_example,
+                            safeguard, safeguard_kind, review_comment, fingerprint,
+                            source, kind, added_after_completion, source_note,
+                            origin_finding_id, status, decision_note,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                                  0, ?, ?, 'accepted', ?, ?, ?)
+                        """,
+                        (
+                            review["id"],
+                            carried_key,
+                            source_finding["severity"],
+                            source_finding["title"],
+                            source_finding["path"],
+                            source_finding["start_line"],
+                            source_finding["end_line"],
+                            source_finding["explanation"],
+                            source_finding["failure_example"],
+                            source_finding["safeguard"],
+                            source_finding["safeguard_kind"],
+                            source_finding["review_comment"],
+                            source_finding["fingerprint"],
+                            source_finding["source"],
+                            source_finding["kind"],
+                            source_finding["source_note"],
+                            origin_id,
+                            (
+                                f"Carried from {source_key} {finding_key} after "
+                                "current-head verification."
+                            ),
+                            timestamp,
+                            timestamp,
+                        ),
+                    )
+                else:
+                    carried_key = current_match["finding_key"]
+                    connection.execute(
+                        """
+                        UPDATE findings SET origin_finding_id = ?, source = ?,
+                            kind = ?, source_note = ?, status = 'accepted',
+                            updated_at = ? WHERE id = ?
+                        """,
+                        (
+                            origin_id,
+                            source_finding["source"],
+                            source_finding["kind"],
+                            source_finding["source_note"],
+                            timestamp,
+                            current_match["id"],
+                        ),
+                    )
+                carried_into_round.append(
+                    {
+                        "source_claim_key": source_key,
+                        "source_finding_id": finding_key,
+                        "finding_id": carried_key,
+                    }
+                )
             record_event(
                 connection,
                 "previous_finding_reconciled",
@@ -1534,7 +1800,11 @@ def complete_review(
             "review_completed",
             pull_request_id=review["pull_request_id"],
             review_round_id=review["id"],
-            payload={"report": str(report), "findings": finding_ids},
+            payload={
+                "report": str(report),
+                "findings": finding_ids,
+                "carried_findings": carried_into_round,
+            },
         )
         connection.commit()
         updated = connection.execute(
@@ -1944,6 +2214,141 @@ def remote_pending_reviews(repository: str, number: int) -> list[dict[str, Any]]
     ]
 
 
+def recorded_prior_pending_review(
+    state_path: Path,
+    key: str,
+    remote_pending: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    remote_ids = {
+        int(item["id"])
+        for item in remote_pending
+        if item.get("id") is not None
+    }
+    if not remote_ids:
+        return None
+    connection = connect_state(state_path)
+    try:
+        review, _ = get_round(connection, key)
+        placeholders = ",".join("?" for _ in remote_ids)
+        rows = connection.execute(
+            f"""
+            SELECT gr.*, rr.claim_key AS source_claim_key
+            FROM github_reviews gr
+            JOIN review_rounds rr ON rr.id = gr.review_round_id
+            WHERE rr.pull_request_id = ? AND rr.id != ?
+              AND gr.state = 'PENDING'
+              AND gr.github_review_id IN ({placeholders})
+            ORDER BY gr.id DESC
+            """,
+            (review["pull_request_id"], review["id"], *sorted(remote_ids)),
+        ).fetchall()
+        if len(rows) != 1 or len(remote_pending) != 1:
+            return None
+        return dict(rows[0])
+    finally:
+        connection.close()
+
+
+def verify_recorded_pending_unchanged(
+    repository: str,
+    number: int,
+    pending_review: dict[str, Any],
+    state_path: Path,
+) -> None:
+    github_review_id = pending_review["github_review_id"]
+    remote_review = run_json(
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/pulls/{number}/reviews/{github_review_id}",
+        ]
+    )
+    if remote_review.get("state") != "PENDING":
+        raise QueueError(
+            "The recorded prior review is no longer pending on GitHub: "
+            f"{remote_review.get('state')}"
+        )
+    if (remote_review.get("body") or "") != (pending_review.get("body") or ""):
+        raise QueueError(
+            "The prior pending review body was edited outside this workflow; "
+            "it was left untouched"
+        )
+
+    connection = connect_state(state_path)
+    try:
+        local_comments = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT * FROM github_review_comments
+                WHERE github_review_id = ? AND line IS NOT NULL
+                ORDER BY id
+                """,
+                (pending_review["id"],),
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+    remote_comments = run_json(
+        [
+            "gh",
+            "api",
+            f"repos/{repository}/pulls/{number}/reviews/"
+            f"{github_review_id}/comments?per_page=100",
+        ]
+    )
+    if len(remote_comments) != len(local_comments):
+        raise QueueError(
+            "The prior pending review comments changed outside this workflow; "
+            "it was left untouched"
+        )
+    for local_comment in local_comments:
+        remote_comment = match_remote_review_comment(local_comment, remote_comments)
+        if remote_comment is None or remote_comment.get("body") != local_comment["body"]:
+            raise QueueError(
+                "A prior pending review comment was edited outside this workflow; "
+                "it was left untouched"
+            )
+
+
+def mark_pending_review_deleted(
+    state_path: Path,
+    key: str,
+    pending_review: dict[str, Any],
+) -> None:
+    connection = connect_state(state_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        review, pull_request = get_round(connection, key)
+        stored = connection.execute(
+            "SELECT * FROM github_reviews WHERE id = ?",
+            (pending_review["id"],),
+        ).fetchone()
+        if stored is None or stored["state"] != "PENDING":
+            raise QueueError("Prior pending review state changed during replacement")
+        timestamp = isoformat()
+        connection.execute(
+            "UPDATE github_reviews SET state = 'DELETED', updated_at = ? WHERE id = ?",
+            (timestamp, stored["id"]),
+        )
+        record_event(
+            connection,
+            "github_pending_review_deleted_for_rereview",
+            pull_request_id=pull_request["id"],
+            review_round_id=review["id"],
+            payload={
+                "deleted_github_review_id": stored["github_review_id"],
+                "source_claim_key": pending_review["source_claim_key"],
+            },
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
 def store_draft_review(
     state_path: Path,
     key: str,
@@ -2099,10 +2504,34 @@ def draft_review(
         }
 
     pending = remote_pending_reviews(preview["repository"], preview["number"])
+    replaced_review_id = None
     if pending:
-        raise QueueError(
-            f"GitHub already has a pending review for this user: {pending[-1]['id']}"
+        prior_pending = recorded_prior_pending_review(state_path, key, pending)
+        if prior_pending is None:
+            raise QueueError(
+                "GitHub has a pending review that is not the single recorded prior "
+                f"review for this PR: {pending[-1]['id']}"
+            )
+        verify_recorded_pending_unchanged(
+            preview["repository"], preview["number"], prior_pending, state_path
         )
+        replaced_review_id = prior_pending["github_review_id"]
+        run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "DELETE",
+                f"repos/{preview['repository']}/pulls/{preview['number']}"
+                f"/reviews/{replaced_review_id}",
+            ]
+        )
+        mark_pending_review_deleted(state_path, key, prior_pending)
+        if current_pr_head(preview["url"]) != preview["head_sha"]:
+            raise QueueError(
+                "PR head changed while replacing the prior pending review; "
+                "nothing was published"
+            )
     response = run_json(
         [
             "gh",
@@ -2115,7 +2544,7 @@ def draft_review(
         ],
         input_data=preview["review"],
     )
-    return store_draft_review(
+    result = store_draft_review(
         state_path,
         key,
         preview["finding_ids"],
@@ -2123,6 +2552,9 @@ def draft_review(
         preview["payload_hash"],
         response,
     )
+    if replaced_review_id is not None:
+        result["replaced_github_review_id"] = replaced_review_id
+    return result
 
 
 def match_remote_review_comment(
@@ -2693,7 +3125,7 @@ def review_history(
                     SELECT finding_key, severity, title, path, start_line, end_line,
                            status, decision_note, failure_example, safeguard,
                            safeguard_kind, review_comment, source, kind,
-                           added_after_completion, source_note
+                           added_after_completion, source_note, origin_finding_id
                     FROM findings WHERE review_round_id = ? ORDER BY id
                     """,
                     (review["id"],),
@@ -2742,7 +3174,10 @@ def report_path(candidate: dict[str, Any]) -> Path:
     repo = candidate["repository"].replace("/", "--")
     short_sha = candidate["head_sha"][:12]
     request_id = candidate.get("review_request_event_id")
+    rereview_id = candidate.get("rereview_id")
     request_suffix = f"--request-{request_id}" if request_id else ""
+    if rereview_id is not None:
+        request_suffix = f"--rereview-{rereview_id}"
     filename = (
         f"{repo}--pr-{candidate['number']}--{short_sha}{request_suffix}.md"
     )
@@ -2793,6 +3228,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--key", required=True)
+
+    prepare_rereview_parser = subparsers.add_parser("prepare-rereview")
+    prepare_rereview_parser.add_argument("--repository", required=True)
+    prepare_rereview_parser.add_argument("--number", required=True, type=int)
 
     prepare_related = subparsers.add_parser("prepare-related")
     prepare_related.add_argument("--pr-url", required=True)
@@ -2886,6 +3325,16 @@ def main() -> int:
                 config, args.state, args.key
             )
             print(json.dumps({"status": "prepared", "candidate": candidate}, indent=2))
+        elif args.command == "prepare-rereview":
+            candidate = prepare_rereview(
+                config, args.state, args.repository, args.number
+            )
+            print(
+                json.dumps(
+                    {"status": "prepared-rereview", "candidate": candidate},
+                    indent=2,
+                )
+            )
         elif args.command == "prepare-related":
             candidate = prepare_related_pr(args.pr_url, config)
             print(

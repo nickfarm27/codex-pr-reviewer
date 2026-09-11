@@ -10,6 +10,14 @@ A dispatched worker receives one exact claim key in its initiating prompt. Run:
 python3 bin/review_queue.py prepare --key '<exact claim key>'
 ```
 
+For a direct user-requested re-review inside the PR's already bound continuing task, run this instead:
+
+```sh
+python3 bin/review_queue.py prepare-rereview --repository 'OWNER/REPO' --number NUMBER
+```
+
+Use the returned `candidate.key` for the same completion flow below. This is the only supported path for a user-triggered re-review without a fresh GitHub review request; do not write a detached manual report.
+
 Never run `claim` or `dispatch` from a worker, and never switch to another candidate if preparation fails. Review only the returned candidate's `diff_range` inside `checkout_path`.
 
 The preparation result also includes `suggested_findings_path` and, on later rounds for the same PR, `previous_review`. Refresh the active lease after context gathering and again before writing the final report:
@@ -72,7 +80,7 @@ Also write a machine-readable JSON document to `suggested_findings_path`, even w
 }
 ```
 
-Use stable IDs `F-01`, `F-02`, and so on within each round. `kind` is `defect` or `maintainability`. `safeguard_kind` is `implementation` or `regression_test`; use `implementation` for pseudocode, responsibility splits, timelines, data examples, and diagrams as well as literal patch sketches. Omit `start_line` and `end_line` only when the concern cannot be anchored to a changed line; such a finding becomes part of the review body instead of an inline comment. The JSON must contain only findings that pass the applicable review gate. `previous_findings` must reconcile every carried finding from `previous_review`.
+Use stable IDs `F-01`, `F-02`, and so on within each round. `kind` is `defect` or `maintainability`. `safeguard_kind` is `implementation` or `regression_test`; use `implementation` for pseudocode, responsibility splits, timelines, data examples, and diagrams as well as literal patch sketches. Omit `start_line` and `end_line` only when the concern cannot be anchored to a changed line; such a finding becomes part of the review body instead of an inline comment. The JSON must contain only findings that pass the applicable review gate. `previous_findings` must reconcile every carried finding from `previous_review`. Items marked `still_open` are copied into the current round as accepted findings with their reviewed wording and provenance; `resolved` and `obsolete` items are not carried forward.
 
 ## 4. Complete the cycle
 

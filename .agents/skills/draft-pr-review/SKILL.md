@@ -64,7 +64,7 @@ Work in the Codex PR Reviewer project and keep the action tied to the current PR
    python3 bin/review_queue.py draft-review --key 'CLAIM_KEY' --confirm DRAFT
    ```
 
-The commands recheck the PR head, prevent duplicate local drafts and findings, and refuse to collide with another pending review. Do not bypass those safeguards or use `gh` directly. A pending review is not visible to the PR author until submitted.
+The commands recheck the PR head and prevent duplicate local drafts and findings. After a completed current-head re-review, `draft-review` may replace exactly one unchanged pending review recorded by this workflow on the prior round; it leaves unrecorded, unrelated, or remotely edited pending reviews untouched. Do not bypass those safeguards or use `gh` directly. A pending review is not visible to the PR author until submitted.
 
 ## Revise an existing draft
 

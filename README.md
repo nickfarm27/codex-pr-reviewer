@@ -57,6 +57,7 @@ python3 bin/review_queue.py doctor
 python3 bin/review_queue.py list
 python3 bin/review_queue.py dispatch
 python3 bin/review_queue.py prepare --key 'OWNER/REPO#NUMBER@SHA'
+python3 bin/review_queue.py prepare-rereview --repository 'OWNER/REPO' --number NUMBER
 python3 bin/review_queue.py bind-task --key 'OWNER/REPO#NUMBER@SHA' --thread-id 'TASK_ID'
 python3 bin/review_queue.py heartbeat --key 'OWNER/REPO#NUMBER@SHA'
 python3 bin/review_queue.py prepare-related --pr-url 'https://github.com/OWNER/REPO/pull/NUMBER'
@@ -80,7 +81,7 @@ The `local_repositories` mapping lets preparation borrow Git objects from an exi
 
 `max_concurrent_reviews` limits active claimed, preparing, and reviewing workers across dispatch runs. It defaults to four, so three pending PRs produce three worker tasks immediately. A later dispatcher fills newly available slots without duplicating active work.
 
-Review-request event IDs are part of the round identity when GitHub provides them. This allows a PR to be reviewed again after the reviewer is re-requested even when its head SHA did not change. A claimed review has a renewable lease; workers call `heartbeat` so a genuinely active long review is not reclaimed.
+Review-request event IDs are part of the round identity when GitHub provides them. This allows a PR to be reviewed again after the reviewer is re-requested even when its head SHA did not change. A direct re-review request in the continuing PR task uses `prepare-rereview` to create the same kind of current-head lifecycle round without requiring another GitHub review request. A claimed review has a renewable lease; workers call `heartbeat` so a genuinely active long review is not reclaimed.
 
 ## Acting on findings
 
@@ -92,7 +93,7 @@ The repo includes three discoverable Codex skills under `.agents/skills/`:
 
 If you notice something after a clean automated review, you do not need to ask GitHub for another review. Ask the continuing PR task to draft your concern. It verifies the concern against the exact current head, appends it to SQLite as `U-01`, `U-02`, and so on with `source: user`, and leaves the original report unchanged. User items can be requirements, questions, suggestions, or defects; they are described faithfully instead of being forced through the autonomous defect gate. Asking to draft your own item also accepts it, so there is no redundant confirmation step.
 
-Drafting and submitting remain separate actions, giving you a final inspection point before anything becomes visible to the author. While a review is pending, ask the PR task to improve or revise a comment and it will update the GitHub draft and the stored finding together. Draft edits can change the wording, explanation, examples, safeguard, severity, title, and item kind; moving the file or line anchor requires replacing the draft. The commands recheck the PR head, use idempotency and pending-review collision safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings—including user addenda—so it can mark each one resolved, still open, or obsolete.
+Drafting and submitting remain separate actions, giving you a final inspection point before anything becomes visible to the author. While a review is pending, ask the PR task to improve or revise a comment and it will update the GitHub draft and the stored finding together. Draft edits can change the wording, explanation, examples, safeguard, severity, title, and item kind; moving the file or line anchor requires replacing the draft. The commands recheck the PR head, use idempotency and pending-review collision safeguards, and persist GitHub review/comment IDs. A later review round receives the earlier report and all accepted, drafted, submitted, or still-open findings—including user addenda—so it can mark each one resolved, still open, or obsolete. Verified still-open items become accepted snapshots on the current round. If the workflow owns one unchanged pending draft from the prior round, drafting after the re-review replaces it on the current head; unrelated or externally edited drafts remain untouched.
 
 The SQLite database is the source of truth for dispatch, task bindings, review rounds, finding decisions, and GitHub review state. `history` provides a readable JSON view for the agent and for troubleshooting. Existing `.state/reviews.json` data from older versions is imported once and retained as a backup.
 

@@ -32,6 +32,27 @@ def candidate(sha: str = "a" * 40, number: int = 12) -> dict:
     }
 
 
+def pr_details_document(item: dict) -> dict:
+    return {
+        "number": item["number"],
+        "title": item["title"],
+        "body": "Tracks PC-10042.",
+        "url": item["url"],
+        "state": "OPEN",
+        "isDraft": False,
+        "author": {"login": item["author"]},
+        "headRefOid": item["head_sha"],
+        "headRefName": item["head_ref"],
+        "baseRefName": item["base_ref"],
+        "mergeable": item["mergeable"],
+        "statusCheckRollup": item["checks"],
+        "labels": [],
+        "changedFiles": 1,
+        "additions": 2,
+        "deletions": 1,
+    }
+
+
 def finding_document() -> dict:
     return {
         "findings": [
@@ -274,7 +295,7 @@ class QueueTests(unittest.TestCase):
         ).fetchone()["value"]
         migrated.close()
 
-        self.assertEqual(version, "3")
+        self.assertEqual(version, "4")
         self.assertEqual(dict(finding), {
             "source": "agent",
             "kind": "defect",
@@ -475,6 +496,65 @@ class QueueTests(unittest.TestCase):
                 self.config, self.state_path, "acme/widgets#404@missing"
             )
 
+    @patch.object(review_queue, "prepare_checkout")
+    @patch.object(review_queue, "pr_details")
+    @patch.object(review_queue, "candidates")
+    def test_user_rereview_creates_and_prepares_a_current_head_round(
+        self, candidates_mock, pr_details_mock, prepare_checkout_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        review_queue.bind_task(
+            self.state_path,
+            first["key"],
+            thread_id="task-123",
+            host_id="local",
+            client_thread_id=None,
+        )
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        current = candidate("b" * 40)
+        pr_details_mock.return_value = pr_details_document(current)
+        destination = Path(self.temporary.name) / "rereview-checkout"
+        prepare_checkout_mock.return_value = destination
+
+        prepared = review_queue.prepare_rereview(
+            self.config, self.state_path, current["repository"], current["number"]
+        )
+
+        self.assertEqual(prepared["head_sha"], current["head_sha"])
+        self.assertEqual(prepared["review_trigger"], "user_rereview")
+        self.assertIn("~rereview-1", prepared["key"])
+        self.assertIn("--rereview-1.md", prepared["suggested_report_path"])
+        self.assertEqual(
+            prepared["previous_review"]["accepted_findings"][0]["finding_key"],
+            "F-01",
+        )
+        connection = review_queue.connect_state(self.state_path)
+        row = connection.execute(
+            "SELECT status FROM review_rounds WHERE claim_key = ?",
+            (prepared["key"],),
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row["status"], "reviewing")
+
+    @patch.object(review_queue, "pr_details")
+    def test_user_rereview_requires_an_existing_bound_task(
+        self, pr_details_mock
+    ) -> None:
+        with self.assertRaisesRegex(review_queue.QueueError, "not bound"):
+            review_queue.prepare_rereview(
+                self.config, self.state_path, "acme/widgets", 12
+            )
+        pr_details_mock.assert_not_called()
+
     def test_dispatch_rejects_zero_limit_before_discovery(self) -> None:
         with patch.object(review_queue, "candidates") as candidates_mock:
             with self.assertRaises(review_queue.QueueError):
@@ -624,6 +704,111 @@ class QueueTests(unittest.TestCase):
             review_queue.complete_review(
                 self.state_path, second["key"], report, findings
             )
+
+    @patch.object(review_queue, "candidates")
+    def test_still_open_finding_becomes_an_accepted_current_round_snapshot(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "rereview.md"
+        findings = Path(self.temporary.name) / "rereview.findings.json"
+        report.write_text("# Re-review\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "still_open",
+                            "note": "The code is unchanged.",
+                        }
+                    ],
+                }
+            )
+        )
+
+        review_queue.complete_review(
+            self.state_path, second["key"], report, findings
+        )
+        preview = review_queue.preview_review(self.state_path, second["key"], None)
+        history = review_queue.review_history(
+            self.state_path, second["repository"], second["number"]
+        )
+
+        current_finding = history["review_rounds"][0]["findings"][0]
+        self.assertEqual(preview["finding_ids"], ["F-01"])
+        self.assertEqual(preview["review"]["commit_id"], second["head_sha"])
+        self.assertEqual(current_finding["status"], "accepted")
+        self.assertIsNotNone(current_finding["origin_finding_id"])
+        self.assertEqual(
+            current_finding["review_comment"],
+            finding_document()["findings"][0]["review_comment"],
+        )
+
+    @patch.object(review_queue, "candidates")
+    def test_resolved_finding_does_not_resurface_in_a_later_round(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "resolved.md"
+        findings = Path(self.temporary.name) / "resolved.json"
+        report.write_text("# Resolved\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "resolved",
+                            "note": "Fixed on the new head.",
+                        }
+                    ],
+                }
+            )
+        )
+        review_queue.complete_review(
+            self.state_path, second["key"], report, findings
+        )
+
+        third = candidate("c" * 40)
+        candidates_mock.return_value = [third]
+        review_queue.claim_candidate(self.config, self.state_path)
+        context = review_queue.previous_review_context(
+            self.state_path, third["key"]
+        )
+
+        self.assertEqual(context["accepted_findings"], [])
 
     def test_finding_line_range_cannot_run_backwards(self) -> None:
         finding = finding_document()["findings"][0]
@@ -1210,6 +1395,161 @@ class QueueTests(unittest.TestCase):
             review_queue.draft_review(
                 self.state_path, item["key"], None, "DRAFT"
             )
+
+    @patch.object(review_queue, "run")
+    @patch.object(review_queue, "run_json")
+    @patch.object(review_queue, "remote_pending_reviews")
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_current_round_replaces_an_unchanged_recorded_prior_draft(
+        self,
+        candidates_mock,
+        current_head_mock,
+        pending_mock,
+        run_json_mock,
+        run_mock,
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        old_preview = review_queue.preview_review(
+            self.state_path, first["key"], None
+        )
+        pending_mock.side_effect = [[], [{"id": 700, "state": "PENDING"}]]
+        current_head_mock.side_effect = [
+            first["head_sha"],
+            "b" * 40,
+            "b" * 40,
+        ]
+        run_json_mock.side_effect = [
+            {
+                "id": 700,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-700",
+            },
+            {
+                "id": 700,
+                "state": "PENDING",
+                "body": old_preview["review"]["body"],
+            },
+            [
+                {
+                    "id": 701,
+                    "path": "app/models/widget.rb",
+                    "line": 15,
+                    "body": finding_document()["findings"][0]["review_comment"],
+                }
+            ],
+            {
+                "id": 800,
+                "state": "PENDING",
+                "html_url": "https://github.com/acme/widgets/pull/12#review-800",
+            },
+        ]
+        review_queue.draft_review(self.state_path, first["key"], None, "DRAFT")
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "rereview.md"
+        findings = Path(self.temporary.name) / "rereview.json"
+        report.write_text("# Re-review\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "still_open",
+                            "note": "Still present on the current head.",
+                        }
+                    ],
+                }
+            )
+        )
+        review_queue.complete_review(
+            self.state_path, second["key"], report, findings
+        )
+
+        replaced = review_queue.draft_review(
+            self.state_path, second["key"], None, "DRAFT"
+        )
+
+        self.assertEqual(replaced["github_review_id"], 800)
+        self.assertEqual(replaced["replaced_github_review_id"], 700)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            [
+                "gh",
+                "api",
+                "--method",
+                "DELETE",
+                "repos/acme/widgets/pulls/12/reviews/700",
+            ],
+        )
+        history = review_queue.review_history(
+            self.state_path, second["repository"], second["number"]
+        )
+        self.assertEqual(
+            history["review_rounds"][0]["github_reviews"][0]["state"],
+            "PENDING",
+        )
+        self.assertEqual(
+            history["review_rounds"][0]["github_reviews"][0]["github_review_id"],
+            800,
+        )
+        self.assertEqual(
+            history["review_rounds"][1]["github_reviews"][0]["state"],
+            "DELETED",
+        )
+
+    @patch.object(review_queue, "run")
+    @patch.object(review_queue, "run_json")
+    @patch.object(
+        review_queue,
+        "remote_pending_reviews",
+        return_value=[{"id": 999, "state": "PENDING"}],
+    )
+    @patch.object(review_queue, "current_pr_head")
+    @patch.object(review_queue, "candidates")
+    def test_unrecorded_pending_review_is_never_replaced(
+        self,
+        candidates_mock,
+        current_head_mock,
+        _pending_mock,
+        run_json_mock,
+        run_mock,
+    ) -> None:
+        item = candidate()
+        candidates_mock.return_value = [item]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(item)
+        review_queue.decide_findings(
+            self.state_path,
+            item["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        current_head_mock.return_value = item["head_sha"]
+
+        with self.assertRaisesRegex(review_queue.QueueError, "not the single recorded"):
+            review_queue.draft_review(
+                self.state_path, item["key"], None, "DRAFT"
+            )
+
+        run_json_mock.assert_not_called()
+        run_mock.assert_not_called()
 
     @patch.object(review_queue, "prepare_checkout")
     @patch.object(review_queue, "pr_details")
