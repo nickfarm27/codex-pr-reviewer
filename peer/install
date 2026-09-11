@@ -13,7 +13,8 @@ Defaults:
   --install-dir ~/.local/share/nickfarm27-pr-review
 
 Use --host custom with --skills-dir for another Agent Skills-compatible client.
---skip-oauth configures supported clients without starting their Linear login.
+--skip-oauth avoids interactive Linear login. Claude is configured for later login;
+Codex MCP setup is deferred because current Codex versions authenticate during add.
 EOF
 }
 
@@ -160,41 +161,42 @@ else
   echo "Downloaded Nicholas PR Review $version to $INSTALL_ROOT."
 fi
 
-configure_linear() {
-  client="$1"
-  details="$download_dir/$client-linear.txt"
-  if "$client" mcp get linear >"$details" 2>&1; then
-    grep -F "$LINEAR_URL" "$details" >/dev/null 2>&1 || {
-      echo "$client already has a different MCP server named linear; refusing to replace it." >&2
-      exit 1
-    }
-    echo "$client: Linear MCP is already configured."
-  elif [ "$client" = "codex" ]; then
-    codex mcp add linear --url "$LINEAR_URL"
-  else
-    claude mcp add --scope user --transport http linear "$LINEAR_URL"
-  fi
-
-  if [ "$SKIP_OAUTH" -eq 0 ]; then
-    echo "$client: starting Linear OAuth..."
-    "$client" mcp login linear
-  else
-    echo "$client: Linear OAuth skipped; run '$client mcp login linear' before reviewing."
-  fi
-}
-
+ANY_LINEAR_PENDING=0
 for agent_host in $HOSTS; do
+  LINEAR_PENDING=0
   if [ "$agent_host" = "custom" ]; then
     "$INSTALL_ROOT/setup" --host custom --skills-dir "$CUSTOM_SKILLS_DIR" --skip-doctor
     "$INSTALL_ROOT/bin/doctor" --host custom --skills-dir "$CUSTOM_SKILLS_DIR"
     echo "Configure $LINEAR_URL in the custom agent and complete OAuth before reviewing."
   else
     "$INSTALL_ROOT/setup" --host "$agent_host" --skip-doctor
-    configure_linear "$agent_host"
-    "$INSTALL_ROOT/bin/doctor" --host "$agent_host"
+    linear_args="--host $agent_host"
+    if [ "$SKIP_OAUTH" -eq 1 ]; then
+      linear_args="$linear_args --skip-oauth"
+    fi
+    if "$INSTALL_ROOT/bin/configure-linear" $linear_args; then
+      :
+    else
+      configure_status=$?
+      if [ "$configure_status" -eq 10 ]; then
+        LINEAR_PENDING=1
+      else
+        exit "$configure_status"
+      fi
+    fi
+    if [ "$LINEAR_PENDING" -eq 1 ]; then
+      ANY_LINEAR_PENDING=1
+      "$INSTALL_ROOT/bin/doctor" --host "$agent_host" --allow-pending-linear
+    else
+      "$INSTALL_ROOT/bin/doctor" --host "$agent_host"
+    fi
   fi
 done
 
 echo ""
-echo "Nicholas PR Review $version is ready. Reload the agent, then invoke:"
+if [ "$ANY_LINEAR_PENDING" -eq 1 ]; then
+  echo "Nicholas PR Review $version is installed, but Linear OAuth is still required."
+else
+  echo "Nicholas PR Review $version is ready. Reload the agent, then invoke:"
+fi
 echo '$nickfarm27-pr-review Review https://github.com/owner/repository/pull/123'

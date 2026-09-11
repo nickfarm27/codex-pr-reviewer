@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -eu
+
+LINEAR_SERVER="nickfarm27-linear-readonly"
+LINEAR_URL="https://mcp.linear.app/mcp/readonly"
+HOST=""
+SKIP_OAUTH=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }; HOST="$2"; shift 2 ;;
+    --skip-oauth) SKIP_OAUTH=1; shift ;;
+    *) echo "Usage: configure-linear --host codex|claude [--skip-oauth]" >&2; exit 2 ;;
+  esac
+done
+
+case "$HOST" in
+  codex|claude) ;;
+  *) echo "--host must be codex or claude" >&2; exit 2 ;;
+esac
+command -v "$HOST" >/dev/null 2>&1 || {
+  echo "$HOST is not installed or is not available on PATH." >&2
+  exit 1
+}
+
+details_file="$(mktemp)"
+trap 'rm -f "$details_file"' EXIT INT TERM
+if "$HOST" mcp get "$LINEAR_SERVER" >"$details_file" 2>&1; then
+  grep -F "$LINEAR_URL" "$details_file" >/dev/null 2>&1 || {
+    echo "$HOST already has a different MCP server named $LINEAR_SERVER; refusing to replace it." >&2
+    exit 1
+  }
+  echo "$HOST: namespaced read-only Linear MCP is already configured; leaving its OAuth state unchanged."
+  exit 0
+fi
+
+interactive=0
+if [ -t 0 ] || [ "${NICKFARM27_PR_REVIEW_INTERACTIVE:-0}" = "1" ]; then
+  interactive=1
+fi
+
+if [ "$HOST" = "codex" ]; then
+  if [ "$SKIP_OAUTH" -eq 1 ] || [ "$interactive" -eq 0 ]; then
+    echo "codex: Linear setup deferred because 'codex mcp add' starts OAuth automatically."
+    echo "Run: codex mcp add $LINEAR_SERVER --url $LINEAR_URL"
+    exit 10
+  fi
+  echo "codex: adding the namespaced read-only Linear MCP; Codex will start its single OAuth flow."
+  codex mcp add "$LINEAR_SERVER" --url "$LINEAR_URL"
+  exit 0
+fi
+
+claude mcp add --scope user --transport http "$LINEAR_SERVER" "$LINEAR_URL"
+if [ "$SKIP_OAUTH" -eq 1 ] || [ "$interactive" -eq 0 ]; then
+  echo "claude: Linear OAuth deferred."
+  echo "Run: claude mcp login $LINEAR_SERVER"
+  exit 10
+fi
+echo "claude: starting Linear OAuth..."
+claude mcp login "$LINEAR_SERVER"

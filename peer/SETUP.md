@@ -14,7 +14,7 @@ You also need access to the GitHub repositories being reviewed and the Linear wo
 
 ## Level 1 — one-command installation
 
-This is the recommended path for most peers. It detects Codex and Claude Code, downloads the latest `peer-v*` release, verifies its SHA-256 checksum, installs the skill, configures Linear's read-only MCP endpoint, starts required OAuth, and runs diagnostics.
+This is the recommended path for most peers. It detects Codex and Claude Code, downloads the latest `peer-v*` release, verifies its SHA-256 checksum, installs the skill, configures Linear's read-only MCP endpoint under the namespaced server `nickfarm27-linear-readonly`, starts required OAuth once, and runs diagnostics. Existing Linear connections—including write-capable ones—remain separate and unchanged.
 
 ```sh
 /bin/bash <(curl -fsSL https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install) --host auto
@@ -22,7 +22,7 @@ This is the recommended path for most peers. It detects Codex and Claude Code, d
 
 Use `--host codex` or `--host claude` to configure only one agent. The installer is safe to rerun and refuses to replace unrelated files, directories, skill links, or MCP configurations.
 
-If the machine cannot open interactive OAuth during installation, add `--skip-oauth`, then run the printed login command later.
+If the machine cannot open interactive OAuth during installation, add `--skip-oauth`, then run the printed setup or login command later. Codex defers the whole MCP-add step in this mode because current Codex versions automatically start OAuth from `mcp add`.
 
 ## Level 2 — ask your agent to install it
 
@@ -90,18 +90,19 @@ For another Agent Skills-compatible client, provide its user-level skill directo
 For Codex:
 
 ```sh
-codex mcp add linear --url https://mcp.linear.app/mcp/readonly
-codex mcp login linear
+codex mcp add nickfarm27-linear-readonly --url https://mcp.linear.app/mcp/readonly
 ```
 
 For Claude Code:
 
 ```sh
-claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/readonly
-claude mcp login linear
+claude mcp add --scope user --transport http nickfarm27-linear-readonly https://mcp.linear.app/mcp/readonly
+claude mcp login nickfarm27-linear-readonly
 ```
 
-The native Claude plugin already declares this read-only server; approve its OAuth prompt when Claude first connects. For another client, add the same URL as a user-level streamable HTTP MCP server and complete OAuth.
+Codex starts OAuth as part of `mcp add`; do not run a second login command. The native Claude plugin already declares this read-only server; approve its OAuth prompt when Claude first connects. For another client, add the same namespaced server and URL at user scope and complete OAuth.
+
+The unique server name is intentional. It prevents installation from replacing an existing `linear` server and gives the skill an unambiguous read-only connection. Existing full-access Linear connectors retain their original permissions, but this review skill must not use them.
 
 ### 5. Verify the installation
 
@@ -167,7 +168,7 @@ Reload the agent after an update.
 
 - **A prerequisite is missing:** install the command named by the bootstrapper, then rerun the same command.
 - **GitHub cannot be read:** run `gh auth login` and confirm access with `gh auth status`.
-- **Linear is unavailable:** run the appropriate `mcp get linear` and `mcp login linear` commands, then confirm that the URL is `https://mcp.linear.app/mcp/readonly`.
+- **Linear is unavailable:** run `mcp get nickfarm27-linear-readonly` for the relevant client, complete the printed setup or login command, and confirm that the URL is `https://mcp.linear.app/mcp/readonly`.
 - **No Linear issue can be identified:** link the issue in the pull-request title or description, or provide it when invoking the skill.
 - **An existing skill blocks setup:** installation never overwrites another entry. Inspect and remove or rename the conflicting `nickfarm27-pr-review` entry only when you know it is safe.
 - **An existing MCP server named `linear` uses another URL:** the bootstrapper deliberately stops instead of replacing it. Resolve that configuration manually.

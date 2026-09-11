@@ -10,6 +10,7 @@ LEGACY_CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 RESTORE_CODEX_LINK=0
 RESTORE_CLAUDE_LINK=0
+LINEAR_PENDING=0
 
 link_points_to_skill() {
   [ -L "$1" ] && [ "$(readlink "$1")" = "$SKILL_SOURCE" ]
@@ -28,6 +29,35 @@ refresh_owned_links() {
   fi
   if [ "$RESTORE_CLAUDE_LINK" -eq 1 ]; then
     "$PEER_ROOT/setup" --host claude --skip-doctor
+  fi
+}
+
+configure_linear_hosts() {
+  for agent_host in codex claude; do
+    if [ "$agent_host" = "codex" ]; then
+      [ "$RESTORE_CODEX_LINK" -eq 1 ] || continue
+    else
+      [ "$RESTORE_CLAUDE_LINK" -eq 1 ] || continue
+    fi
+    if "$PEER_ROOT/bin/configure-linear" --host "$agent_host"; then
+      :
+    else
+      configure_status=$?
+      if [ "$configure_status" -eq 10 ]; then
+        LINEAR_PENDING=1
+      else
+        exit "$configure_status"
+      fi
+    fi
+  done
+}
+
+report_update() {
+  update_description="$1"
+  if [ "$LINEAR_PENDING" -eq 1 ]; then
+    echo "$update_description Linear setup is pending; run the command printed above, then reload the agent."
+  else
+    echo "$update_description Reload the agent before reviewing."
   fi
 }
 
@@ -58,7 +88,8 @@ case "$origin" in
   fi
   git -C "$repo_root" merge --ff-only origin/main
   refresh_owned_links
-  echo "Updated Nicholas PR Review from origin/main. Reload the agent before reviewing."
+  configure_linear_hosts
+  report_update "Updated Nicholas PR Review from origin/main."
   exit 0
   ;;
 esac
@@ -96,7 +127,8 @@ mv "$PEER_ROOT" "$backup"
 if mv "$stage" "$PEER_ROOT"; then
   rm -rf "$backup"
   refresh_owned_links
-  echo "Updated Nicholas PR Review to $version. Reload the agent before reviewing."
+  configure_linear_hosts
+  report_update "Updated Nicholas PR Review to $version."
 else
   rm -rf "$PEER_ROOT"
   mv "$backup" "$PEER_ROOT"
