@@ -1,109 +1,134 @@
 # Set up Nicholas PR Review
 
-This guide installs the review skill for one user on macOS or Linux. It does not install or start the scheduled dispatcher, create local review state, or give the skill permission to post on GitHub.
+Install the private, report-only review skill at user scope on macOS or Linux. Installation never enables the scheduled dispatcher, creates review state, or modifies a project repository.
 
-## 1. Install the prerequisites
+## Before you start
 
-Install the agent you want to use, Git, and the [GitHub CLI](https://cli.github.com/). On macOS with Homebrew:
+You need Codex, Claude Code, or another Agent Skills-compatible client, plus curl, Git, and the [GitHub CLI](https://cli.github.com/). On macOS with Homebrew:
 
 ```sh
 brew install git gh
 ```
 
-Authenticate GitHub and confirm that you can read the repositories you review:
+You also need access to the GitHub repositories being reviewed and the Linear workspace containing their related issues. The installer can start both login flows, but you must approve access interactively.
+
+## Level 1 — one-command installation
+
+This is the recommended path for most peers. It detects Codex and Claude Code, downloads the latest `peer-v*` release, verifies its SHA-256 checksum, installs the skill, configures Linear's read-only MCP endpoint, starts required OAuth, and runs diagnostics.
+
+```sh
+/bin/bash <(curl -fsSL https://raw.githubusercontent.com/nickfarm27/codex-pr-reviewer/main/peer/install) --host auto
+```
+
+Use `--host codex` or `--host claude` to configure only one agent. The installer is safe to rerun and refuses to replace unrelated files, directories, skill links, or MCP configurations.
+
+If the machine cannot open interactive OAuth during installation, add `--skip-oauth`, then run the printed login command later.
+
+## Level 2 — ask your agent to install it
+
+Open Codex or Claude Code and paste the instruction in [INSTALL_PROMPT.md](INSTALL_PROMPT.md). The agent first inspects the bootstrap script, runs the same one-command installation, pauses for your OAuth approvals, and reports the installed version and diagnostics.
+
+This is the easiest option for someone who does not want to operate the terminal themselves. It performs the same installation as Level 1 and does not add files to their current project.
+
+## Level 3 — manual installation and troubleshooting
+
+Use this path when you want to inspect each step or need a custom agent location.
+
+### 1. Authenticate GitHub
 
 ```sh
 gh auth login
 gh auth status
 ```
 
-You also need access to the Linear workspace containing the issues linked to those pull requests. The skill deliberately stops if either GitHub or Linear context is unavailable.
+### 2. Download the peer package
 
-## 2. Install the skill
-
-### Codex, Claude Code, or both
-
-The repository checkout is the recommended installation because the same command can support both agents and makes updates simple:
-
-```sh
-git clone --depth 1 https://github.com/nickfarm27/codex-pr-reviewer.git ~/.local/share/codex-pr-reviewer
-~/.local/share/codex-pr-reviewer/peer/setup --host auto
-```
-
-Use `--host codex` or `--host claude` instead of `auto` when you only want one agent.
-
-### Peer-only GitHub Release
-
-To avoid cloning the dispatcher, download the matching `.tar.gz` and `.sha256` assets from the [latest GitHub Release](https://github.com/nickfarm27/codex-pr-reviewer/releases). Then verify and install them:
+Download the matching `.tar.gz` and `.sha256` files from the [latest GitHub Release](https://github.com/nickfarm27/codex-pr-reviewer/releases), then verify and extract them:
 
 ```sh
 cd ~/Downloads
 shasum -a 256 -c nickfarm27-pr-review-X.Y.Z.tar.gz.sha256
 mkdir -p ~/.local/share
 tar -xzf nickfarm27-pr-review-X.Y.Z.tar.gz -C ~/.local/share
-~/.local/share/nickfarm27-pr-review/setup --host auto
 ```
 
 Replace `X.Y.Z` with the release version. Keep the extracted directory in place because the installed skill links point to it.
 
-### Native Claude Code plugin
-
-Claude Code can install directly from the repository marketplace instead of using the checkout-based setup:
+Alternatively, use a repository checkout:
 
 ```sh
-claude plugin marketplace add nickfarm27/codex-pr-reviewer
-claude plugin install nickfarm27-pr-review@nickfarm27-tools --scope user
+git clone --depth 1 https://github.com/nickfarm27/codex-pr-reviewer.git ~/.local/share/codex-pr-reviewer
 ```
 
-### Another Agent Skills-compatible harness
+### 3. Register the skill
 
-Tell setup where that agent keeps user-level skills:
+For a peer-only release:
 
 ```sh
-~/.local/share/codex-pr-reviewer/peer/setup \
+~/.local/share/nickfarm27-pr-review/setup --host auto --skip-doctor
+```
+
+For a repository checkout:
+
+```sh
+~/.local/share/codex-pr-reviewer/peer/setup --host auto --skip-doctor
+```
+
+Use `--host codex` or `--host claude` for one client. Codex is installed at user scope under `~/.agents/skills`; Claude Code uses `~/.claude/skills`.
+
+For another Agent Skills-compatible client, provide its user-level skill directory:
+
+```sh
+~/.local/share/nickfarm27-pr-review/setup \
   --host custom \
-  --skills-dir /path/to/agent/skills
+  --skills-dir /path/to/agent/skills \
+  --skip-doctor
 ```
 
-The other harness must support the Agent Skills `SKILL.md` format, local shell commands, GitHub access, and remote MCP servers.
+### 4. Connect Linear
 
-## 3. Connect Linear
-
-For a checkout-based Codex installation:
+For Codex:
 
 ```sh
 codex mcp add linear --url https://mcp.linear.app/mcp/readonly
 codex mcp login linear
 ```
 
-For a checkout-based Claude Code installation:
+For Claude Code:
 
 ```sh
 claude mcp add --scope user --transport http linear https://mcp.linear.app/mcp/readonly
 claude mcp login linear
 ```
 
-The native Claude plugin already declares the read-only Linear server; complete its OAuth prompt when Claude first connects. For another harness, add `https://mcp.linear.app/mcp/readonly` as a user-level streamable HTTP MCP server and complete its OAuth flow.
+The native Claude plugin already declares this read-only server; approve its OAuth prompt when Claude first connects. For another client, add the same URL as a user-level streamable HTTP MCP server and complete OAuth.
 
-## 4. Verify the installation
+### 5. Verify the installation
 
-For an installation created by `setup`, run:
+For a peer-only release:
+
+```sh
+~/.local/share/nickfarm27-pr-review/bin/doctor --host auto
+```
+
+For a repository checkout:
 
 ```sh
 ~/.local/share/codex-pr-reviewer/peer/bin/doctor --host auto
 ```
 
-For a peer-only release installation, use `~/.local/share/nickfarm27-pr-review/bin/doctor --host auto` instead.
+Use the corresponding single-host or custom-host arguments when appropriate. Restart or reload the agent if the skill does not immediately appear.
 
-Use `--host codex`, `--host claude`, or `--host custom --skills-dir /path/to/agent/skills` when appropriate. For the native Claude plugin, verify it with:
+### Native Claude Code plugin alternative
+
+Claude Code can install directly from the repository marketplace:
 
 ```sh
-claude plugin list
+claude plugin marketplace add nickfarm27/codex-pr-reviewer
+claude plugin install nickfarm27-pr-review@nickfarm27-tools --scope user
 ```
 
-Restart or reload the agent so it discovers the new skill. The plugin will prompt for Linear OAuth when it first connects.
-
-## 5. Run a first review
+## Run the first review
 
 Open the repository containing the pull-request branch and invoke the skill explicitly:
 
@@ -111,18 +136,23 @@ Open the repository containing the pull-request branch and invoke the skill expl
 $nickfarm27-pr-review Review https://github.com/owner/repository/pull/123
 ```
 
-Before reviewing code, the skill checks its installed release, resolves the exact GitHub pull request, and reads a trustworthy related Linear issue. A successful result is returned only in the conversation; it does not comment on or modify the pull request.
+Before reviewing code, the skill checks its installed release, resolves the exact GitHub pull request, and reads a trustworthy related Linear issue. The result stays in the conversation; it does not modify or comment on the pull request.
 
 ## Update or remove it
 
-For a checkout or release installation:
+For the one-command or peer-release installation:
+
+```sh
+~/.local/share/nickfarm27-pr-review/upgrade
+~/.local/share/nickfarm27-pr-review/uninstall --host auto
+```
+
+For a repository checkout:
 
 ```sh
 ~/.local/share/codex-pr-reviewer/peer/upgrade
 ~/.local/share/codex-pr-reviewer/peer/uninstall --host auto
 ```
-
-For a peer-only release, replace `~/.local/share/codex-pr-reviewer/peer` with `~/.local/share/nickfarm27-pr-review`.
 
 For the native Claude plugin:
 
@@ -135,8 +165,9 @@ Reload the agent after an update.
 
 ## Common blockers
 
-- **The skill is out of date:** run `upgrade` or the Claude plugin update command, reload the agent, and invoke it again.
-- **GitHub cannot be read:** run `gh auth status`, then `gh auth login` if needed. Confirm that the account can open the target repository and pull request.
-- **Linear is unavailable:** confirm the `linear` MCP server is present, finish its OAuth flow, and make sure the linked issue belongs to a workspace you can access.
-- **No Linear issue can be identified:** add the issue link or identifier to the pull-request title or description, or provide the issue explicitly when invoking the skill.
-- **An existing skill blocks setup:** setup never overwrites another file or link. Remove or rename the conflicting `nickfarm27-pr-review` entry yourself only after confirming that it is safe.
+- **A prerequisite is missing:** install the command named by the bootstrapper, then rerun the same command.
+- **GitHub cannot be read:** run `gh auth login` and confirm access with `gh auth status`.
+- **Linear is unavailable:** run the appropriate `mcp get linear` and `mcp login linear` commands, then confirm that the URL is `https://mcp.linear.app/mcp/readonly`.
+- **No Linear issue can be identified:** link the issue in the pull-request title or description, or provide it when invoking the skill.
+- **An existing skill blocks setup:** installation never overwrites another entry. Inspect and remove or rename the conflicting `nickfarm27-pr-review` entry only when you know it is safe.
+- **An existing MCP server named `linear` uses another URL:** the bootstrapper deliberately stops instead of replacing it. Resolve that configuration manually.

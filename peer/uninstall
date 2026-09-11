@@ -14,7 +14,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}"
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
+LEGACY_CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
 
 remove_link() {
@@ -40,9 +41,17 @@ remove_link() {
 case "$HOST" in
   auto)
     remove_link "codex" "$CODEX_SKILLS_DIR"
+    if [ -z "${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR+x}" ] && [ "$LEGACY_CODEX_SKILLS_DIR" != "$CODEX_SKILLS_DIR" ]; then
+      remove_link "codex legacy" "$LEGACY_CODEX_SKILLS_DIR"
+    fi
     remove_link "claude" "$CLAUDE_SKILLS_DIR"
     ;;
-  codex) remove_link "codex" "$CODEX_SKILLS_DIR" ;;
+  codex)
+    remove_link "codex" "$CODEX_SKILLS_DIR"
+    if [ -z "${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR+x}" ] && [ "$LEGACY_CODEX_SKILLS_DIR" != "$CODEX_SKILLS_DIR" ]; then
+      remove_link "codex legacy" "$LEGACY_CODEX_SKILLS_DIR"
+    fi
+    ;;
   claude) remove_link "claude" "$CLAUDE_SKILLS_DIR" ;;
   custom)
     [ -n "$CUSTOM_SKILLS_DIR" ] || { echo "--host custom requires --skills-dir PATH" >&2; exit 2; }

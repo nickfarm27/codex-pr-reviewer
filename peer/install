@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -eu
+
+usage() {
+  cat <<'EOF'
+Download, verify, install, and configure Nicholas PR Review.
+
+Usage: install [--host auto|codex|claude|custom] [--skills-dir PATH]
+               [--install-dir PATH] [--skip-oauth]
+
+Defaults:
+  --host auto
+  --install-dir ~/.local/share/nickfarm27-pr-review
+
+Use --host custom with --skills-dir for another Agent Skills-compatible client.
+--skip-oauth configures supported clients without starting their Linear login.
+EOF
+}
+
+REPOSITORY="nickfarm27/codex-pr-reviewer"
+LINEAR_URL="https://mcp.linear.app/mcp/readonly"
+HOST="auto"
+CUSTOM_SKILLS_DIR=""
+INSTALL_ROOT="${NICKFARM27_PR_REVIEW_INSTALL_DIR:-$HOME/.local/share/nickfarm27-pr-review}"
+SKIP_OAUTH=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --host) [ "$#" -ge 2 ] || { echo "Missing value for --host" >&2; exit 2; }; HOST="$2"; shift 2 ;;
+    --host=*) HOST="${1#--host=}"; shift ;;
+    --skills-dir) [ "$#" -ge 2 ] || { echo "Missing value for --skills-dir" >&2; exit 2; }; CUSTOM_SKILLS_DIR="$2"; shift 2 ;;
+    --skills-dir=*) CUSTOM_SKILLS_DIR="${1#--skills-dir=}"; shift ;;
+    --install-dir) [ "$#" -ge 2 ] || { echo "Missing value for --install-dir" >&2; exit 2; }; INSTALL_ROOT="$2"; shift 2 ;;
+    --install-dir=*) INSTALL_ROOT="${1#--install-dir=}"; shift ;;
+    --skip-oauth) SKIP_OAUTH=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$HOST" in
+  auto|codex|claude) [ -z "$CUSTOM_SKILLS_DIR" ] || { echo "--skills-dir requires --host custom" >&2; exit 2; } ;;
+  custom) [ -n "$CUSTOM_SKILLS_DIR" ] || { echo "--host custom requires --skills-dir PATH" >&2; exit 2; } ;;
+  *) echo "Unsupported host: $HOST" >&2; exit 2 ;;
+esac
+case "$INSTALL_ROOT" in
+  /*) ;;
+  *) echo "--install-dir must be an absolute path" >&2; exit 2 ;;
+esac
+[ "$INSTALL_ROOT" != "/" ] && [ "$INSTALL_ROOT" != "$HOME" ] || {
+  echo "Refusing unsafe install directory: $INSTALL_ROOT" >&2
+  exit 2
+}
+[ ! -L "$INSTALL_ROOT" ] || {
+  echo "Refusing to replace a symlinked install directory: $INSTALL_ROOT" >&2
+  exit 1
+}
+
+for required_command in gh git tar; do
+  command -v "$required_command" >/dev/null 2>&1 || {
+    echo "$required_command is required. Install it, then run this installer again." >&2
+    exit 1
+  }
+done
+if command -v shasum >/dev/null 2>&1; then
+  CHECKSUM_COMMAND="shasum"
+elif command -v sha256sum >/dev/null 2>&1; then
+  CHECKSUM_COMMAND="sha256sum"
+else
+  echo "shasum or sha256sum is required." >&2
+  exit 1
+fi
+
+if ! gh auth status --hostname github.com >/dev/null 2>&1; then
+  if [ -t 0 ]; then
+    echo "GitHub authentication is required. Starting the browser login..."
+    gh auth login --hostname github.com --git-protocol https --web
+  else
+    echo "GitHub authentication is required. Run 'gh auth login', then retry." >&2
+    exit 1
+  fi
+fi
+
+HOSTS=""
+add_host() { HOSTS="${HOSTS}${HOSTS:+ }$1"; }
+case "$HOST" in
+  auto)
+    command -v codex >/dev/null 2>&1 && add_host codex
+    command -v claude >/dev/null 2>&1 && add_host claude
+    [ -n "$HOSTS" ] || {
+      echo "No supported agent was detected. Install Codex or Claude Code, then retry." >&2
+      exit 1
+    }
+    ;;
+  codex|claude)
+    command -v "$HOST" >/dev/null 2>&1 || {
+      echo "$HOST is not installed or is not available on PATH." >&2
+      exit 1
+    }
+    add_host "$HOST"
+    ;;
+  custom) add_host custom ;;
+esac
+
+tag="$(gh release list --repo "$REPOSITORY" --limit 100 \
+  --json tagName,isDraft,isPrerelease \
+  --jq '[.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | startswith("peer-v")))][0].tagName')"
+[ -n "$tag" ] || { echo "No published Nicholas PR Review release was found." >&2; exit 1; }
+case "$tag" in
+  peer-v*) version="${tag#peer-v}" ;;
+  *) echo "Unexpected release tag: $tag" >&2; exit 1 ;;
+esac
+
+download_dir="$(mktemp -d)"
+trap 'rm -rf "$download_dir"' EXIT INT TERM
+archive="nickfarm27-pr-review-$version.tar.gz"
+checksum="$archive.sha256"
+gh release download "$tag" --repo "$REPOSITORY" \
+  --pattern "$archive" --pattern "$checksum" --dir "$download_dir"
+if [ "$CHECKSUM_COMMAND" = "shasum" ]; then
+  (cd "$download_dir" && shasum -a 256 -c "$checksum")
+else
+  (cd "$download_dir" && sha256sum -c "$checksum")
+fi
+tar -xzf "$download_dir/$archive" -C "$download_dir"
+downloaded_root="$download_dir/nickfarm27-pr-review"
+downloaded_version="$(tr -d '[:space:]' < "$downloaded_root/plugins/nickfarm27-pr-review/VERSION" 2>/dev/null || true)"
+[ "$downloaded_version" = "$version" ] && [ -x "$downloaded_root/setup" ] || {
+  echo "The verified release is incomplete or does not match $tag." >&2
+  exit 1
+}
+
+install_parent="$(dirname "$INSTALL_ROOT")"
+mkdir -p "$install_parent"
+if [ -e "$INSTALL_ROOT" ]; then
+  existing_manifest="$INSTALL_ROOT/plugins/nickfarm27-pr-review/.codex-plugin/plugin.json"
+  existing_version_file="$INSTALL_ROOT/plugins/nickfarm27-pr-review/VERSION"
+  [ -f "$existing_manifest" ] && [ -f "$existing_version_file" ] || {
+    echo "Refusing to replace an unrelated directory: $INSTALL_ROOT" >&2
+    exit 1
+  }
+  existing_version="$(tr -d '[:space:]' < "$existing_version_file")"
+  if [ "$existing_version" = "$version" ]; then
+    echo "Nicholas PR Review $version is already downloaded."
+  else
+    backup="$install_parent/.nickfarm27-pr-review-backup-$$"
+    [ ! -e "$backup" ] || { echo "Temporary backup path already exists: $backup" >&2; exit 1; }
+    mv "$INSTALL_ROOT" "$backup"
+    if mv "$downloaded_root" "$INSTALL_ROOT"; then
+      rm -rf "$backup"
+      echo "Updated Nicholas PR Review from $existing_version to $version."
+    else
+      mv "$backup" "$INSTALL_ROOT"
+      echo "Installation failed; restored Nicholas PR Review $existing_version." >&2
+      exit 1
+    fi
+  fi
+else
+  mv "$downloaded_root" "$INSTALL_ROOT"
+  echo "Downloaded Nicholas PR Review $version to $INSTALL_ROOT."
+fi
+
+configure_linear() {
+  client="$1"
+  details="$download_dir/$client-linear.txt"
+  if "$client" mcp get linear >"$details" 2>&1; then
+    grep -F "$LINEAR_URL" "$details" >/dev/null 2>&1 || {
+      echo "$client already has a different MCP server named linear; refusing to replace it." >&2
+      exit 1
+    }
+    echo "$client: Linear MCP is already configured."
+  elif [ "$client" = "codex" ]; then
+    codex mcp add linear --url "$LINEAR_URL"
+  else
+    claude mcp add --scope user --transport http linear "$LINEAR_URL"
+  fi
+
+  if [ "$SKIP_OAUTH" -eq 0 ]; then
+    echo "$client: starting Linear OAuth..."
+    "$client" mcp login linear
+  else
+    echo "$client: Linear OAuth skipped; run '$client mcp login linear' before reviewing."
+  fi
+}
+
+for agent_host in $HOSTS; do
+  if [ "$agent_host" = "custom" ]; then
+    "$INSTALL_ROOT/setup" --host custom --skills-dir "$CUSTOM_SKILLS_DIR" --skip-doctor
+    "$INSTALL_ROOT/bin/doctor" --host custom --skills-dir "$CUSTOM_SKILLS_DIR"
+    echo "Configure $LINEAR_URL in the custom agent and complete OAuth before reviewing."
+  else
+    "$INSTALL_ROOT/setup" --host "$agent_host" --skip-doctor
+    configure_linear "$agent_host"
+    "$INSTALL_ROOT/bin/doctor" --host "$agent_host"
+  fi
+done
+
+echo ""
+echo "Nicholas PR Review $version is ready. Reload the agent, then invoke:"
+echo '$nickfarm27-pr-review Review https://github.com/owner/repository/pull/123'

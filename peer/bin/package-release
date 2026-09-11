@@ -23,7 +23,7 @@ trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 bundle="nickfarm27-pr-review"
 stage="$tmp_dir/$bundle"
 mkdir -p "$stage/bin" "$stage/plugins"
-cp "$PEER_ROOT/setup" "$PEER_ROOT/upgrade" "$PEER_ROOT/uninstall" "$PEER_ROOT/README.md" "$PEER_ROOT/SETUP.md" "$stage/"
+cp "$PEER_ROOT/install" "$PEER_ROOT/setup" "$PEER_ROOT/upgrade" "$PEER_ROOT/uninstall" "$PEER_ROOT/README.md" "$PEER_ROOT/SETUP.md" "$PEER_ROOT/INSTALL_PROMPT.md" "$stage/"
 cp "$PEER_ROOT/bin/doctor" "$PEER_ROOT/bin/check-update" "$stage/bin/"
 cp -R "$PLUGIN_ROOT" "$stage/plugins/"
 mkdir -p "$OUTPUT_DIR"

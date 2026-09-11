@@ -31,8 +31,9 @@ else
   fail "GitHub CLI is required"
 fi
 
-CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-${CODEX_HOME:-$HOME/.codex}/skills}"
+CODEX_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 CLAUDE_SKILLS_DIR="${NICKFARM27_PR_REVIEW_CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+LINEAR_URL="https://mcp.linear.app/mcp/readonly"
 check_link() {
   host_name="$1"
   target="$2/nickfarm27-pr-review"
@@ -43,10 +44,24 @@ check_link() {
   fi
 }
 
+check_linear() {
+  client="$1"
+  command -v "$client" >/dev/null 2>&1 || {
+    fail "$client is required for this installation"
+    return
+  }
+  details="$("$client" mcp get linear 2>/dev/null || true)"
+  if printf '%s\n' "$details" | grep -F "$LINEAR_URL" >/dev/null 2>&1; then
+    pass "$client Linear MCP endpoint is configured"
+  else
+    fail "$client Linear MCP endpoint is missing or uses another URL"
+  fi
+}
+
 checked_links=0
 case "$HOST" in
-  codex) checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR" ;;
-  claude) checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR" ;;
+  codex) checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR"; check_linear codex ;;
+  claude) checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR"; check_linear claude ;;
   custom)
     if [ -n "$CUSTOM_SKILLS_DIR" ]; then
       checked_links=1
@@ -56,15 +71,14 @@ case "$HOST" in
     fi
     ;;
   auto)
-    if [ -L "$CODEX_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR"; fi
-    if [ -L "$CLAUDE_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR"; fi
+    if [ -L "$CODEX_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Codex" "$CODEX_SKILLS_DIR"; check_linear codex; fi
+    if [ -L "$CLAUDE_SKILLS_DIR/nickfarm27-pr-review" ]; then checked_links=1; check_link "Claude" "$CLAUDE_SKILLS_DIR"; check_linear claude; fi
     ;;
   *) fail "Unsupported host: $HOST" ;;
 esac
 [ "$checked_links" -eq 1 ] || fail "No installed Nicholas PR Review skill link was found"
 
-note "Linear authentication is verified at invocation by reading the related issue."
-note "Required endpoint: https://mcp.linear.app/mcp/readonly"
+note "Linear authentication is finally verified at invocation by reading the related issue."
 
 if [ "$CHECK_REMOTE" -eq 1 ]; then
   "$PEER_ROOT/bin/check-update" || failures=$((failures + 1))
