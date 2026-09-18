@@ -66,7 +66,7 @@ Also write a machine-readable JSON document to `suggested_findings_path`, even w
       "failure_example": "Specific input, state, sequence, or maintenance scenario that demonstrates the concern.",
       "safeguard": "Small illustrative solution shape or, when more useful, a focused verification test.",
       "safeguard_kind": "implementation",
-      "review_comment": "Concise, self-contained GitHub-ready comment explaining the concern, consequence, concrete example, and an illustrative solution shape."
+      "review_comment": "Concise, self-contained GitHub-ready comment explaining the concern and consequence, followed for a material finding by short **Concrete example** and **Possible solution** sections that preserve the strongest failure_example and safeguard."
     }
   ],
   "previous_findings": [
@@ -81,6 +81,8 @@ Also write a machine-readable JSON document to `suggested_findings_path`, even w
 ```
 
 Use stable IDs `F-01`, `F-02`, and so on within each round. `kind` is `defect` or `maintainability`. `safeguard_kind` is `implementation` or `regression_test`; use `implementation` for pseudocode, responsibility splits, timelines, data examples, and diagrams as well as literal patch sketches. Omit `start_line` and `end_line` only when the concern cannot be anchored to a changed line; such a finding becomes part of the review body instead of an inline comment. The JSON must contain only findings that pass the applicable review gate. `previous_findings` must reconcile every carried finding from `previous_review`. Items marked `still_open` are copied into the current round as accepted findings with their reviewed wording and provenance; `resolved` and `obsolete` items are not carried forward.
+
+Build each material `review_comment` from the same evidence as the finding: lead with the mechanism and consequence, then retain the strongest `failure_example` under `**Concrete example**` and the bounded `safeguard` under `**Possible solution**`. Condense those fields when needed, but do not flatten away the domain values or event sequence that make the issue understandable. The possible solution remains illustrative rather than required architecture. A compact paragraph without labels is acceptable only for a self-evident, one-line defect when the sections would add repetition rather than clarity; it must still include the consequence and a plausible solution shape.
 
 ## 4. Complete the cycle
 
