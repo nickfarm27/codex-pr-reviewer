@@ -30,6 +30,8 @@ FINDING_STATUSES = {
     "drafted",
     "submitted",
     "resolved",
+    "resolved_by_code",
+    "resolved_by_scope_decision",
     "still_open",
     "obsolete",
 }
@@ -63,6 +65,51 @@ mutation UpdatePullRequestReviewComment($commentId: ID!, $body: String!) {
       id
       body
       url
+    }
+  }
+}
+""".strip()
+REVIEW_THREADS_QUERY = """
+query ReviewThreads(
+  $owner: String!
+  $name: String!
+  $number: Int!
+  $cursor: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          isResolved
+          isOutdated
+          path
+          line
+          originalLine
+          resolvedBy { login }
+          rootComments: comments(first: 1) {
+            nodes {
+              databaseId
+              body
+              createdAt
+              url
+              author { login }
+            }
+          }
+          latestComments: comments(last: 20) {
+            nodes {
+              databaseId
+              body
+              createdAt
+              url
+              author { login }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
     }
   }
 }
@@ -974,11 +1021,143 @@ def active_carried_findings(
     ).fetchall()
 
 
+def github_review_threads(repository: str, number: int) -> dict[int, dict[str, Any]]:
+    """Return review threads keyed by their root REST comment database ID."""
+    owner, separator, name = repository.partition("/")
+    if not separator or not owner or not name:
+        raise QueueError(f"Invalid GitHub repository name: {repository}")
+
+    threads: dict[int, dict[str, Any]] = {}
+    cursor: str | None = None
+    while True:
+        response = run_json(
+            ["gh", "api", "graphql", "--input", "-"],
+            input_data={
+                "query": REVIEW_THREADS_QUERY,
+                "variables": {
+                    "owner": owner,
+                    "name": name,
+                    "number": number,
+                    "cursor": cursor,
+                },
+            },
+        )
+        errors = response.get("errors") or []
+        if errors:
+            messages = ", ".join(
+                error.get("message", "unknown GraphQL error") for error in errors
+            )
+            raise QueueError(f"GitHub could not refresh review threads: {messages}")
+        thread_connection = (
+            response.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("reviewThreads")
+        )
+        if not thread_connection:
+            raise QueueError("GitHub did not return pull-request review threads")
+
+        for thread in thread_connection.get("nodes") or []:
+            root_nodes = (thread.get("rootComments") or {}).get("nodes") or []
+            if not root_nodes or root_nodes[0].get("databaseId") is None:
+                continue
+            root = root_nodes[0]
+            root_id = int(root["databaseId"])
+            latest = (thread.get("latestComments") or {}).get("nodes") or []
+            replies = [
+                {
+                    "comment_id": item.get("databaseId"),
+                    "author": (item.get("author") or {}).get("login"),
+                    "body": item.get("body"),
+                    "created_at": item.get("createdAt"),
+                    "url": item.get("url"),
+                }
+                for item in latest
+                if item.get("databaseId") != root_id
+            ]
+            threads[root_id] = {
+                "status": "published",
+                "root_comment_id": root_id,
+                "root_comment_url": root.get("url"),
+                "is_resolved": bool(thread.get("isResolved")),
+                "is_outdated": bool(thread.get("isOutdated")),
+                "resolved_by": (thread.get("resolvedBy") or {}).get("login"),
+                "path": thread.get("path"),
+                "line": thread.get("line"),
+                "original_line": thread.get("originalLine"),
+                "latest_replies": replies,
+            }
+
+        page_info = thread_connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            return threads
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            raise QueueError("GitHub review-thread pagination omitted its cursor")
+
+
+def carried_finding_thread_evidence(
+    connection: sqlite3.Connection,
+    pull_request: sqlite3.Row,
+    findings: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Refresh discussion evidence for workflow-owned carried findings."""
+    comment_ids: dict[int, int | None] = {}
+    for finding in findings:
+        lineage_id = finding["origin_finding_id"] or finding["id"]
+        comment = connection.execute(
+            """
+            SELECT grc.github_comment_id
+            FROM findings linked
+            JOIN github_review_comments grc
+              ON grc.finding_key = linked.finding_key
+            JOIN github_reviews gr
+              ON gr.id = grc.github_review_id
+             AND gr.review_round_id = linked.review_round_id
+            WHERE COALESCE(linked.origin_finding_id, linked.id) = ?
+              AND grc.github_comment_id IS NOT NULL
+              AND gr.state != 'DELETED'
+            ORDER BY gr.id DESC, grc.id DESC
+            LIMIT 1
+            """,
+            (lineage_id,),
+        ).fetchone()
+        comment_ids[finding["id"]] = (
+            int(comment["github_comment_id"]) if comment is not None else None
+        )
+
+    published_ids = {item for item in comment_ids.values() if item is not None}
+    remote_threads = (
+        github_review_threads(pull_request["repository"], pull_request["number"])
+        if published_ids
+        else {}
+    )
+    evidence: dict[int, dict[str, Any]] = {}
+    for finding_id, comment_id in comment_ids.items():
+        if comment_id is None:
+            evidence[finding_id] = {"status": "not_published"}
+        else:
+            evidence[finding_id] = remote_threads.get(
+                comment_id,
+                {
+                    "status": "not_found",
+                    "root_comment_id": comment_id,
+                },
+            )
+    return evidence
+
+
 def previous_review_context(state_path: Path, key: str) -> dict[str, Any] | None:
     connection = connect_state(state_path)
     try:
         current = connection.execute(
-            "SELECT id, pull_request_id FROM review_rounds WHERE claim_key = ?", (key,)
+            """
+            SELECT rr.id, rr.pull_request_id, pr.repository, pr.number
+            FROM review_rounds rr
+            JOIN pull_requests pr ON pr.id = rr.pull_request_id
+            WHERE rr.claim_key = ?
+            """,
+            (key,),
         ).fetchone()
         if current is None:
             raise QueueError(f"Unknown claim key: {key}")
@@ -998,6 +1177,11 @@ def previous_review_context(state_path: Path, key: str) -> dict[str, Any] | None
                 connection, current["pull_request_id"], current["id"]
             )
         ]
+        thread_evidence = carried_finding_thread_evidence(
+            connection, current, findings
+        )
+        for finding in findings:
+            finding["github_thread"] = thread_evidence[finding["id"]]
         github_review = connection.execute(
             """
             SELECT github_review_id, state, event, commit_sha, html_url, submitted_at
@@ -1650,7 +1834,12 @@ def complete_review(
         carried_into_round: list[dict[str, str]] = []
         for disposition in document["previous_findings"]:
             status = disposition.get("status")
-            if status not in {"resolved", "still_open", "obsolete"}:
+            if status not in {
+                "resolved_by_code",
+                "resolved_by_scope_decision",
+                "still_open",
+                "obsolete",
+            }:
                 raise QueueError(f"Invalid previous finding status: {status}")
             source_key = disposition.get("claim_key")
             finding_key = disposition.get("finding_id")
@@ -1666,12 +1855,18 @@ def complete_review(
                 raise QueueError(
                     f"Previous finding not found on this PR: {source_key} {finding_key}"
                 )
+            note = disposition.get("note")
+            if status in {
+                "resolved_by_code",
+                "resolved_by_scope_decision",
+            } and (not isinstance(note, str) or not note.strip()):
+                raise QueueError(f"{status} requires a non-empty note")
             connection.execute(
                 """
                 UPDATE findings SET status = ?, decision_note = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (status, disposition.get("note"), timestamp, source["id"]),
+                (status, note, timestamp, source["id"]),
             )
             if status == "still_open":
                 source_finding = carried_by_pair[(source_key, finding_key)]
@@ -2056,7 +2251,14 @@ def decide_findings(
             *((item, "rejected") for item in reject),
         ]:
             current = available[finding_key]["status"]
-            if current in {"drafted", "submitted", "resolved", "obsolete"}:
+            if current in {
+                "drafted",
+                "submitted",
+                "resolved",
+                "resolved_by_code",
+                "resolved_by_scope_decision",
+                "obsolete",
+            }:
                 raise QueueError(
                     f"{finding_key} cannot change decision from status {current}"
                 )

@@ -28,7 +28,7 @@ Your exact new review-round claim key is: CLAIM_KEY
 
 Run `python3 bin/review_queue.py prepare --key 'CLAIM_KEY'`, then complete the review workflow for only that candidate. Use the returned `previous_review` to reconcile earlier accepted findings and explain what changed since the prior review. Never run `claim` or `dispatch`, never review another PR, and never create another Codex task.
 
-The automated review itself is private and report-only. Never post to GitHub unless the user later invokes one of this project's explicit review-action skills in this same task. Never modify a reviewed repository, invoke a nested Codex CLI process, or use an API key. A clean review with no findings is valid; do not invent feedback.
+The automated review itself is private and report-only. This automation-triggered turn must hard-stop after completing and privately reporting the assigned round. Never draft or submit a GitHub review in this turn, even if an earlier task message requested or authorized one for a prior round. GitHub authorization is consumed by its target round; the completed current round requires a fresh user-authored message before one of this project's explicit review-action skills may run. Never modify a reviewed repository, invoke a nested Codex CLI process, or use an API key. A clean review with no findings is valid; do not invent feedback.
 ```
 
 For `continue_task`, use the app's `send_message_to_thread` action with the exact `task_thread_id`, optional `task_host_id`, and worker prompt. Do not create a replacement merely to get a newer timestamp in the title. After the message is accepted, run:

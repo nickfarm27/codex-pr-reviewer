@@ -120,6 +120,82 @@ class QueueTests(unittest.TestCase):
         return report, findings
 
     @patch.object(review_queue, "run_json")
+    def test_github_review_threads_normalizes_replies_across_pages(
+        self, run_json_mock
+    ) -> None:
+        run_json_mock.side_effect = [
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "isResolved": True,
+                                        "isOutdated": False,
+                                        "path": "app/models/widget.rb",
+                                        "line": 15,
+                                        "originalLine": 15,
+                                        "resolvedBy": {"login": "reviewer"},
+                                        "rootComments": {
+                                            "nodes": [
+                                                {
+                                                    "databaseId": 701,
+                                                    "url": "https://example.test/701",
+                                                }
+                                            ]
+                                        },
+                                        "latestComments": {
+                                            "nodes": [
+                                                {"databaseId": 701},
+                                                {
+                                                    "databaseId": 702,
+                                                    "author": {"login": "author"},
+                                                    "body": "Deferred to v2.",
+                                                    "createdAt": "2026-09-03T01:00:00Z",
+                                                    "url": "https://example.test/702",
+                                                },
+                                            ]
+                                        },
+                                    }
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": True,
+                                    "endCursor": "next-page",
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": {
+                                    "hasNextPage": False,
+                                    "endCursor": None,
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+        ]
+
+        threads = review_queue.github_review_threads("acme/widgets", 12)
+
+        self.assertTrue(threads[701]["is_resolved"])
+        self.assertEqual(threads[701]["resolved_by"], "reviewer")
+        self.assertEqual(threads[701]["latest_replies"][0]["comment_id"], 702)
+        self.assertEqual(
+            run_json_mock.call_args_list[1].kwargs["input_data"]["variables"]["cursor"],
+            "next-page",
+        )
+
+    @patch.object(review_queue, "run_json")
     def test_latest_review_request_event_uses_last_paginated_match(
         self, run_json_mock
     ) -> None:
@@ -675,6 +751,111 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(
             context["accepted_findings"][0]["finding_key"], "F-01"
         )
+        self.assertEqual(
+            context["accepted_findings"][0]["github_thread"],
+            {"status": "not_published"},
+        )
+
+    @patch.object(review_queue, "github_review_threads")
+    @patch.object(review_queue, "candidates")
+    def test_previous_review_context_refreshes_recorded_github_thread(
+        self, candidates_mock, threads_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        connection = review_queue.connect_state(self.state_path)
+        round_id = connection.execute(
+            "SELECT id FROM review_rounds WHERE claim_key = ?", (first["key"],)
+        ).fetchone()["id"]
+        finding_id = connection.execute(
+            "SELECT id FROM findings WHERE review_round_id = ?", (round_id,)
+        ).fetchone()["id"]
+        connection.execute(
+            "UPDATE findings SET status = 'submitted' WHERE id = ?", (finding_id,)
+        )
+        connection.execute(
+            """
+            INSERT INTO github_reviews(
+                review_round_id, github_review_id, state, event, commit_sha,
+                body, html_url, payload_hash, created_at, submitted_at, updated_at
+            ) VALUES (?, 700, 'CHANGES_REQUESTED', 'REQUEST_CHANGES', ?,
+                      'Review', 'https://example.test/review/700', 'hash',
+                      '2026-09-03T00:00:00Z', '2026-09-03T00:00:00Z',
+                      '2026-09-03T00:00:00Z')
+            """,
+            (round_id, first["head_sha"]),
+        )
+        local_review_id = connection.execute(
+            "SELECT id FROM github_reviews WHERE github_review_id = 700"
+        ).fetchone()["id"]
+        connection.execute(
+            """
+            INSERT INTO github_review_comments(
+                github_review_id, finding_key, github_comment_id, path, line,
+                side, body, created_at
+            ) VALUES (?, 'F-01', 701, 'app/models/widget.rb', 15,
+                      'RIGHT', 'Please keep ownership stable.',
+                      '2026-09-03T00:00:00Z')
+            """,
+            (local_review_id,),
+        )
+        connection.commit()
+        connection.close()
+        threads_mock.return_value = {
+            701: {
+                "status": "published",
+                "root_comment_id": 701,
+                "is_resolved": True,
+                "latest_replies": [
+                    {
+                        "author": "pr-author",
+                        "body": "Accepted as a v2 follow-up.",
+                    }
+                ],
+            }
+        }
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        context = review_queue.previous_review_context(
+            self.state_path, second["key"]
+        )
+
+        threads_mock.assert_called_once_with("acme/widgets", 12)
+        thread = context["accepted_findings"][0]["github_thread"]
+        self.assertTrue(thread["is_resolved"])
+        self.assertEqual(thread["latest_replies"][0]["author"], "pr-author")
+
+        report = Path(self.temporary.name) / "thread-still-open.md"
+        findings = Path(self.temporary.name) / "thread-still-open.json"
+        report.write_text("# Still open\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "still_open",
+                            "note": "The current code still has the reported behavior.",
+                        }
+                    ],
+                }
+            )
+        )
+        review_queue.complete_review(
+            self.state_path, second["key"], report, findings
+        )
+        history = review_queue.review_history(
+            self.state_path, second["repository"], second["number"]
+        )
+        self.assertEqual(
+            history["review_rounds"][0]["findings"][0]["status"], "accepted"
+        )
 
     @patch.object(review_queue, "candidates")
     def test_rereview_requires_a_disposition_for_every_carried_finding(
@@ -790,7 +971,7 @@ class QueueTests(unittest.TestCase):
                         {
                             "claim_key": first["key"],
                             "finding_id": "F-01",
-                            "status": "resolved",
+                            "status": "resolved_by_code",
                             "note": "Fixed on the new head.",
                         }
                     ],
@@ -809,6 +990,96 @@ class QueueTests(unittest.TestCase):
         )
 
         self.assertEqual(context["accepted_findings"], [])
+
+    @patch.object(review_queue, "candidates")
+    def test_scope_resolution_requires_and_persists_a_reason(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "scope.md"
+        findings = Path(self.temporary.name) / "scope.json"
+        report.write_text("# Scope decision\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "resolved_by_scope_decision",
+                            "note": (
+                                "The author and reviewer accepted this as a v2 "
+                                "non-goal."
+                            ),
+                        }
+                    ],
+                }
+            )
+        )
+
+        review_queue.complete_review(
+            self.state_path, second["key"], report, findings
+        )
+        history = review_queue.review_history(
+            self.state_path, second["repository"], second["number"]
+        )
+        prior = history["review_rounds"][1]["findings"][0]
+        self.assertEqual(prior["status"], "resolved_by_scope_decision")
+        self.assertIn("v2 non-goal", prior["decision_note"])
+
+    @patch.object(review_queue, "candidates")
+    def test_resolution_without_a_reason_is_rejected(self, candidates_mock) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        self.complete_with_finding(first)
+        review_queue.decide_findings(
+            self.state_path,
+            first["key"],
+            accept=["F-01"],
+            reject=[],
+            note=None,
+        )
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "scope-missing-note.md"
+        findings = Path(self.temporary.name) / "scope-missing-note.json"
+        report.write_text("# Scope decision\n")
+        findings.write_text(
+            json.dumps(
+                {
+                    "findings": [],
+                    "previous_findings": [
+                        {
+                            "claim_key": first["key"],
+                            "finding_id": "F-01",
+                            "status": "resolved_by_scope_decision",
+                            "note": "",
+                        }
+                    ],
+                }
+            )
+        )
+
+        with self.assertRaisesRegex(review_queue.QueueError, "non-empty note"):
+            review_queue.complete_review(
+                self.state_path, second["key"], report, findings
+            )
 
     def test_finding_line_range_cannot_run_backwards(self) -> None:
         finding = finding_document()["findings"][0]
