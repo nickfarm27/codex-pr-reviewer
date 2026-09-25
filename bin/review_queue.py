@@ -36,7 +36,7 @@ FINDING_STATUSES = {
     "obsolete",
 }
 USER_FINDING_KINDS = {"defect", "required_change", "question", "suggestion"}
-AUTOMATED_FINDING_KINDS = {"defect", "maintainability"}
+AUTOMATED_FINDING_KINDS = {"defect", "usability", "maintainability"}
 EDITABLE_FINDING_FIELDS = {
     "severity",
     "title",

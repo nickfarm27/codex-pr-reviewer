@@ -34,7 +34,7 @@ Before running `doctor`, replace `codex_project_id` in `config.json`. The simple
 3. It creates one continuing Codex task for each PR, or sends a later review round to that PR's existing task, then archives itself.
 4. Each worker prepares only its assigned private checkout under `.cache/checkouts/`.
 5. Each worker resolves related Linear issues, then selectively reads their project, milestone, and directly relevant documents.
-6. Codex reviews the full diff, first-order callers and callees, relevant tests, affected contracts, and material design or maintainability regressions using `AGENTS.md` and `prompts/review.md`.
+6. Codex reviews the full diff, first-order callers and callees, relevant tests, affected contracts, and consequential defects, usability issues, or maintainability regressions using `AGENTS.md` and `prompts/review.md`.
 7. Each worker is named `ISSUE-ID · repository#PR · MMM DD HH:mm` for quick identification.
 8. A compact briefing, structured findings, and review are saved under `reports/` and surfaced with direct PR and Linear links.
 9. Accepted automated findings and user-raised review addenda are carried into later review requests, including same-commit re-requests.
@@ -113,13 +113,13 @@ python3 bin/review_queue.py list
 
 ## Review philosophy
 
-The workflow is calibrated for reviewer usefulness rather than activity. It explicitly treats a clean review as a successful outcome and filters out speculative concerns, style preferences, and findings already covered by deterministic tooling. Defects and maintainability findings use separate gates: defects require a concrete reachable failure, while maintainability findings require an evidenced, material cost to understanding, testing, changing, debugging, or safely extending code introduced by the PR.
+The workflow is calibrated for reviewer usefulness rather than activity. It explicitly treats a clean review as a successful outcome and filters out speculative concerns, style preferences, and findings already covered by deterministic tooling. Defects, usability findings, and maintainability findings use separate gates: defects require a concrete reachable failure; usability findings require an introduced, consequential interaction problem grounded in the product's task and conventions; maintainability findings require an evidenced, material cost to understanding, testing, changing, debugging, or safely extending code introduced by the PR. A material UI change without suitable screenshots or other visual artifacts prompts a private request and a coverage limitation, not an invented finding.
 
 Each report is designed to answer, in order:
 
 1. Why does this PR exist, and how does it fit the larger project?
 2. What changes in plain language?
-3. Are there any concrete, consequential defects or material maintainability regressions?
+3. Are there any concrete, consequential defects, usability issues, or material maintainability regressions?
 4. Which files or behaviors should the human reviewer inspect first?
 5. Is anything outside the code—CI, conflicts, dependencies, or limited coverage—blocking merge confidence?
 

@@ -65,6 +65,26 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIn("self-evident, one-line defect", prompt)
         self.assertIn("consequence and a plausible solution shape", prompt)
 
+    def test_interactive_ui_review_is_bounded_and_uses_a_separate_gate(self) -> None:
+        core = (ROOT / "prompts" / "review-core.md").read_text()
+        workflow = (ROOT / "prompts" / "review.md").read_text()
+
+        self.assertIn("only when the PR materially changes", core)
+        self.assertIn("A standalone product is not bound to Shopify", core)
+        self.assertIn("### Usability gate", core)
+        self.assertIn("Classify these findings as `usability`", core)
+        self.assertIn("`defect`, `usability`, or `maintainability`", workflow)
+        self.assertIn("### Usability", core)
+
+    def test_missing_ui_artifacts_prompt_a_private_request_not_a_finding(self) -> None:
+        core = (ROOT / "prompts" / "review-core.md").read_text()
+        workflow = (ROOT / "prompts" / "review.md").read_text()
+
+        self.assertIn("privately ask the user for targeted screenshots", core)
+        self.assertIn("Missing artifacts are not a finding", core)
+        self.assertIn("Do not post the request to GitHub", core)
+        self.assertIn("ask the user in this private handoff", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
