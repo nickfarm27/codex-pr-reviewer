@@ -1,9 +1,9 @@
 ---
 name: nickfarm27-pr-review
-description: Run Nicholas's private, high-signal pull request review when explicitly asked to review a GitHub PR. Requires authenticated GitHub and Linear access, explains the product context and implementation, and reports only evidenced defects or material maintainability regressions.
+description: Run Nicholas's private, high-signal pull request review when explicitly asked to review a GitHub PR. Requires authenticated GitHub and Linear access, explains the product context and implementation, and reports only evidenced defects, consequential usability issues, or material maintainability regressions.
 metadata:
   author: nickfarm27
-  version: "0.3.1"
+  version: "0.4.0"
 ---
 
 # Nicholas PR Review

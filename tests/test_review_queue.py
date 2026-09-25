@@ -1114,6 +1114,35 @@ class QueueTests(unittest.TestCase):
         )
 
     @patch.object(review_queue, "candidates")
+    def test_automated_usability_finding_is_stored_and_carried(
+        self, candidates_mock
+    ) -> None:
+        first = candidate()
+        candidates_mock.return_value = [first]
+        review_queue.claim_candidate(self.config, self.state_path)
+        report = Path(self.temporary.name) / "usability.md"
+        findings = Path(self.temporary.name) / "usability.json"
+        document = finding_document()
+        document["findings"][0]["kind"] = "usability"
+        report.write_text("# Review\n")
+        findings.write_text(json.dumps(document))
+
+        review_queue.complete_review(self.state_path, first["key"], report, findings)
+        review_queue.decide_findings(
+            self.state_path, first["key"], accept=["F-01"], reject=[], note=None
+        )
+        preview = review_queue.preview_review(self.state_path, first["key"], None)
+        self.assertEqual(preview["findings"][0]["kind"], "usability")
+
+        second = candidate("b" * 40)
+        candidates_mock.return_value = [second]
+        review_queue.claim_candidate(self.config, self.state_path)
+        context = review_queue.previous_review_context(
+            self.state_path, second["key"]
+        )
+        self.assertEqual(context["accepted_findings"][0]["kind"], "usability")
+
+    @patch.object(review_queue, "candidates")
     def test_invalid_automated_finding_kind_is_rejected(
         self, candidates_mock
     ) -> None:
