@@ -115,4 +115,4 @@ python3 -m unittest discover -s tests -v
 
 Pull-request CI requires a version bump whenever the shared review policy or release payload changes. Documentation and test-only changes outside `peer/` do not require one.
 
-Push a tag matching the current version, such as `peer-v0.3.0`. GitHub Actions validates the tag and package, creates the archive and checksum, and publishes them as GitHub Release assets.
+Merge a peer version bump to `main` to publish automatically. GitHub Actions tests the merged commit, creates its matching `peer-vX.Y.Z` tag, and publishes the archive and checksum as GitHub Release assets. A push of a matching tag remains a manual release path; rerunning a failed release can finish publishing an existing tag, but a tag pointing at another commit is never replaced.

@@ -2,31 +2,110 @@ name: Release peer review skill
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "peer-v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: peer-review-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate release tag
+        with:
+          fetch-depth: 0
+      - name: Decide whether to publish
+        id: release
         shell: bash
-        run: |
-          version="$(tr -d '[:space:]' < peer/plugins/nickfarm27-pr-review/VERSION)"
-          test "$GITHUB_REF_NAME" = "peer-v$version"
-      - name: Run unit tests
-        run: python3 -m unittest discover -s tests -v
-      - name: Build peer-only release assets
-        run: peer/bin/package-release dist
-      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          PREVIOUS_SHA: ${{ github.event.before }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < peer/plugins/nickfarm27-pr-review/VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid peer version: $version" >&2
+            exit 1
+          fi
+          tag="peer-v$version"
+          previous_version=""
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            previous_version="$(git show "$PREVIOUS_SHA:peer/plugins/nickfarm27-pr-review/VERSION" | tr -d '[:space:]')"
+            if [ "$previous_version" = "$version" ]; then
+              echo "Peer version is unchanged; no release needed."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif [ "$GITHUB_REF" != "refs/tags/$tag" ]; then
+            echo "Release tag $GITHUB_REF does not match peer version $version" >&2
+            exit 1
+          fi
+
+          latest_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
+            --json tagName,isDraft,isPrerelease \
+            --jq '[.[] | select(.isDraft == false and .isPrerelease == false and (.tagName | startswith("peer-v")))][0].tagName // ""')"
+          if [ "$latest_tag" = "$tag" ]; then
+            echo "$tag is already published."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          is_newer() {
+            [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" = "$1" ]
+          }
+          if [ -n "$previous_version" ] && ! is_newer "$version" "$previous_version"; then
+            echo "Peer version must increase ($previous_version -> $version)." >&2
+            exit 1
+          fi
+          if [ -n "$latest_tag" ] && ! is_newer "$version" "${latest_tag#peer-v}"; then
+            echo "Peer version $version is not newer than published $latest_tag." >&2
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Run unit tests
+        if: steps.release.outputs.publish == 'true'
+        run: python3 -m unittest discover -s tests -v
+      - name: Build peer-only release assets
+        if: steps.release.outputs.publish == 'true'
+        run: peer/bin/package-release dist
+      - name: Ensure release tag matches this commit
+        if: steps.release.outputs.publish == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse HEAD)"
+          git fetch --tags origin
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG^{commit}" >/dev/null; then
+            target="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+            if [ "$target" != "$commit" ]; then
+              echo "$RELEASE_TAG points to $target, not $commit." >&2
+              exit 1
+            fi
+          elif [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              tag -a "$RELEASE_TAG" -m "Nicholas PR Review ${RELEASE_TAG#peer-v}" "$commit"
+            git push origin "refs/tags/$RELEASE_TAG"
+          else
+            echo "Tag $RELEASE_TAG is missing from the tag-triggered run." >&2
+            exit 1
+          fi
+      - name: Publish GitHub Release
+        if: steps.release.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \
-            --title "Nicholas PR Review ${GITHUB_REF_NAME#peer-v}" \
+            --title "Nicholas PR Review ${RELEASE_TAG#peer-v}" \
             --generate-notes
