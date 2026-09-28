@@ -3,7 +3,7 @@ name: nickfarm27-pr-review
 description: Run Nicholas's private, high-signal pull request review when explicitly asked to review a GitHub PR. Requires authenticated GitHub and Linear access, explains the product context and implementation, and reports only evidenced defects, consequential usability issues, or material maintainability regressions.
 metadata:
   author: nickfarm27
-  version: "0.4.1"
+  version: "0.4.2"
 ---
 
 # Nicholas PR Review
@@ -40,7 +40,7 @@ If the current checkout cannot safely establish both revisions, use a separate t
 
 ## Finish
 
-Lead with the outcome, then give the simple product context, the before-to-after implementation explanation, any high-confidence findings with concrete examples and illustrative solution shapes, the fastest human review path, and merge-readiness limitations.
+Lead with the outcome, then give the simple product context, the before-to-after implementation explanation, any high-confidence findings with concrete examples and illustrative solution shapes, the fastest human review path, and a merge decision scoped to the reviewed head with any remaining steps or limitations.
 
 Always finish with direct links to the GitHub pull request and the primary Linear issue. State the installed review-policy version shown by `scripts/check-update`.
 
