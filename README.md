@@ -83,13 +83,16 @@ The `local_repositories` mapping lets preparation borrow Git objects from an exi
 
 Review-request event IDs are part of the round identity when GitHub provides them. This allows a PR to be reviewed again after the reviewer is re-requested even when its head SHA did not change. A direct re-review request in the continuing PR task uses `prepare-rereview` to create the same kind of current-head lifecycle round without requiring another GitHub review request. A claimed review has a renewable lease; workers call `heartbeat` so a genuinely active long review is not reclaimed.
 
-## Acting on findings
+## Project skills
 
-The repo includes three discoverable Codex skills under `.agents/skills/`:
+The repo includes four discoverable Codex skills under `.agents/skills/`:
 
 - `draft-pr-review` records accepted automated findings or verified feedback you raise later, previews the exact review payload, and creates a pending GitHub review when explicitly requested.
 - `request-pr-changes` verifies that recorded pending review and submits it as `REQUEST_CHANGES` after a separate explicit request.
 - `reviewer-calibration` audits review conversations and records your decisions on evidence-backed workflow improvements; it applies a change only when you explicitly request implementation.
+- `documentation-fidelity-audit` checks repository or PR documentation for supported claims, audience fit, usable procedures, and avoidable filler when you ask for a documentation audit.
+
+## Acting on findings
 
 If you notice something after a clean automated review, you do not need to ask GitHub for another review. Ask the continuing PR task to draft your concern. It verifies the concern against the exact current head, appends it to SQLite as `U-01`, `U-02`, and so on with `source: user`, and leaves the original report unchanged. User items can be requirements, questions, suggestions, or defects; they are described faithfully instead of being forced through the autonomous defect gate. Asking to draft your own item also accepts it, so there is no redundant confirmation step.
 

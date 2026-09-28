@@ -27,6 +27,8 @@ When prior-review context is available, use it as the starting point. Inspect ea
 
 Inspect the full base-to-head diff, its shape, relevant base-revision guidance, and the main execution paths. Explain the change as a before-to-after story in plain language. Identify the important implementation boundary and anything intentionally left out.
 
+For a PR that adds or materially changes a provider integration, briefly explain a consequential similarity or intentional difference from the closest existing provider path when it helps the reviewer understand the change. Ground the comparison in the inspected code and relevant product decisions.
+
 Use a tiny diagram only when it makes an architecture, state transition, or data flow materially easier to understand. Do not add a diagram decoratively.
 
 ## Review for consequential issues
@@ -40,8 +42,9 @@ Use this review radius for every PR:
 3. Inspect the existing tests that cover those paths and identify material gaps in behavioral coverage.
 4. Check affected data constraints, migrations, API contracts, background jobs, configuration, and error paths when relevant.
 5. Check whether the PR materially worsens readability, cohesion, coupling, responsibility boundaries, sources of truth, or consistency with established repository design.
-6. For a material change to interactive UI, make one bounded pass over the changed user task and relevant interaction states, using the guidance and evidence rules below.
-7. Expand one step farther only when needed to confirm or disprove a concrete defect, usability impact, or maintenance cost. Stop once the behavior or design impact is established; do not browse the repository aimlessly.
+6. For a material provider-integration change, compare the affected behavior with a close existing integration in this repository when one exists. Limit the comparison to relevant ownership, state transitions, ordering, mapping, retries, or recovery. An older provider's behavior is context, not a requirement; a difference becomes a finding only when it independently passes the applicable gate.
+7. For a material change to interactive UI, make one bounded pass over the changed user task and relevant interaction states, using the guidance and evidence rules below.
+8. Expand one step farther only when needed to confirm or disprove a concrete defect, usability impact, or maintenance cost. Stop once the behavior or design impact is established; do not browse the repository aimlessly.
 
 Do not execute code or tests from the pull request. Existing GitHub CI results may be read as evidence.
 
@@ -146,12 +149,15 @@ No findings.
 
 ## Merge readiness
 
+- **Decision at reviewed head:** Ready | Ready after listed steps | Not ready | Unknown; state the concrete reason and any accepted risk.
 - **CI:** concise status, separating PR-owned failures from unrelated failures.
 - **Dependencies:** conflicts, stacked PR order, rollout requirement, or "None found."
 - **Coverage:** what was inspected and any material limitation.
 
 [Open PR #123](https://github.com/owner/repository/pull/123) · [Open ISSUE-ID](https://linear.app/...)
 ```
+
+Synthesize a decision for the reviewed head from the code findings, required checks, GitHub review state, dependencies, rollout order, and recorded accepted risk decisions. Keep code quality separate from procedural merge gates. A clean code review does not make a PR ready while a required check fails, an outstanding changes-requested review blocks it, or a prerequisite remains unmet. Use `Unknown` where material state could not be verified. The PR link and head identify the scope of the decision; include when CI or review state was checked if it may have changed since the review. If the user later asks whether the PR can merge, refresh the head, checks, review state, dependencies, and accepted risk decisions before answering; an earlier code verdict does not cover a new head.
 
 When findings exist, group them under `### Defects`, `### Usability`, and `### Design and maintainability`. Omit an empty group. Keep findings severity-ordered within each group:
 
