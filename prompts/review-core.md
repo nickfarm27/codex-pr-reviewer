@@ -41,7 +41,7 @@ Use this review radius for every PR:
 2. Trace the first-order callers and callees of changed behavior, including important unchanged files at both the base and reviewed head when that comparison matters.
 3. Inspect the existing tests that cover those paths and identify material gaps in behavioral coverage.
 4. Check affected data constraints, migrations, API contracts, background jobs, configuration, and error paths when relevant.
-5. Check whether the PR materially worsens readability, cohesion, coupling, responsibility boundaries, sources of truth, or consistency with established repository design.
+5. Make the bounded code-quality pass below: check whether the PR materially worsens readability, cohesion, coupling, responsibility boundaries, sources of truth, or consistency with established repository design.
 6. For a material provider-integration change, compare the affected behavior with a close existing integration in this repository when one exists. Limit the comparison to relevant ownership, state transitions, ordering, mapping, retries, or recovery. An older provider's behavior is context, not a requirement; a difference becomes a finding only when it independently passes the applicable gate.
 7. For a material change to interactive UI, make one bounded pass over the changed user task and relevant interaction states, using the guidance and evidence rules below.
 8. Expand one step farther only when needed to confirm or disprove a concrete defect, usability impact, or maintenance cost. Stop once the behavior or design impact is established; do not browse the repository aimlessly.
@@ -57,6 +57,14 @@ Stay within the reviewed repository by default. Inspect another repository only 
 - Do not execute code or tests from a related PR.
 - State the exact related PR and head inspected under `Coverage`. If only a branch, moving reference, or vague repository mention is available, do not claim cross-repository verification; report the limitation instead.
 - A defect remains a finding on the reviewed PR only when that PR introduces the broken integration or violates the established contract. Do not turn unrelated problems in the dependency into findings.
+
+### Bounded code-quality pass
+
+Deliberately inspect the structure of changed behavior even when the defect scan is clean. Scale this pass to the PR: a small, local change needs only a quick check; a broad change crossing services or layers warrants tracing where its rules and responsibilities now live.
+
+Use the [Refactoring.Guru code-smell catalog](https://refactoring.guru/refactoring/smells) as diagnostic prompts, not a checklist or scorecard. In particular, look for a rule duplicated across changed callers or requiring many coordinated edits (change preventers), responsibilities or provider-specific decisions in the wrong layer (couplers), and new methods, classes, or abstractions whose size or indirection materially obscures the changed behavior (bloaters or dispensables). A catalog label, line count, or unfamiliar design alone is not evidence of harm.
+
+For a candidate concern, compare base and head, inspect the repository's nearby design, and name a concrete change, test, or debugging task made harder by this PR. Apply the maintainability gate below before reporting it. Use the [refactoring techniques](https://refactoring.guru/refactoring/techniques) to illustrate a small improvement when useful; [design patterns](https://refactoring.guru/design-patterns) are optional solution vocabulary, never a requirement or reason to demand a larger redesign. Do not inventory the full catalogs or report pre-existing debt.
 
 ### Defect gate
 
