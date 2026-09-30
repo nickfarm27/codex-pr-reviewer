@@ -76,6 +76,19 @@ class ReviewPromptTests(unittest.TestCase):
         self.assertIn("`defect`, `usability`, or `maintainability`", workflow)
         self.assertIn("### Usability", core)
 
+    def test_code_quality_catalog_is_a_bounded_diagnostic_lens(self) -> None:
+        core = (ROOT / "prompts" / "review-core.md").read_text()
+
+        self.assertIn("### Bounded code-quality pass", core)
+        self.assertIn("https://refactoring.guru/refactoring/smells", core)
+        self.assertIn("https://refactoring.guru/refactoring/techniques", core)
+        self.assertIn("https://refactoring.guru/design-patterns", core)
+        self.assertIn("not a checklist or scorecard", core)
+        self.assertIn("compare base and head", core)
+        self.assertIn("Apply the maintainability gate below", core)
+        self.assertIn("never a requirement", core)
+        self.assertIn("Do not inventory the full catalogs or report pre-existing debt", core)
+
     def test_missing_ui_artifacts_prompt_a_private_request_not_a_finding(self) -> None:
         core = (ROOT / "prompts" / "review-core.md").read_text()
         workflow = (ROOT / "prompts" / "review.md").read_text()
