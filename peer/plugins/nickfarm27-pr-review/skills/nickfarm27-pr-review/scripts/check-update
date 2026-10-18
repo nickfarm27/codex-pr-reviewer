@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -eu
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-PLUGIN_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+# Resolve the physical directory: agents invoke this through a symlinked skill folder.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+PLUGIN_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd -P)"
 VERSION_FILE="$PLUGIN_ROOT/VERSION"
 REPOSITORY="nickfarm27/codex-pr-reviewer"
 
@@ -42,7 +43,7 @@ case "$tag" in
 esac
 
 if [ "$installed" != "$latest" ]; then
-  peer_root="$(CDPATH= cd -- "$PLUGIN_ROOT/../.." 2>/dev/null && pwd || true)"
+  peer_root="$(CDPATH= cd -- "$PLUGIN_ROOT/../.." 2>/dev/null && pwd -P || true)"
   echo "Nicholas PR Review is not current (installed $installed, latest $latest)." >&2
   if [ -n "$peer_root" ] && [ -x "$peer_root/upgrade" ]; then
     echo "Run '$peer_root/upgrade', reload your agent, then invoke the review again." >&2

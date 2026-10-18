@@ -291,6 +291,42 @@ class PeerDistributionTests(unittest.TestCase):
             self.assertEqual(stale.returncode, 10)
             self.assertIn("not current", stale.stderr)
 
+    def test_update_check_runs_through_the_installed_skill_link(self) -> None:
+        current = (PLUGIN / "VERSION").read_text().strip()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_gh = fake_bin / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$1\" = auth ]; then exit 0; fi\n"
+                "if [ \"$1\" = release ]; then printf 'peer-v%s\\n' \"$FAKE_PEER_VERSION\"; exit 0; fi\n"
+                "exit 1\n"
+            )
+            fake_gh.chmod(0o755)
+            skills = root / "agents" / "skills"
+            skills.mkdir(parents=True)
+            installed = skills / "nickfarm27-pr-review"
+            installed.symlink_to(SKILL)
+            env = {"PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+            ok = self.run_script(
+                installed / "scripts" / "check-update",
+                env={**env, "FAKE_PEER_VERSION": current},
+                check=False,
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertIn(f"{current} is current", ok.stdout)
+
+            stale = self.run_script(
+                installed / "scripts" / "check-update",
+                env={**env, "FAKE_PEER_VERSION": "99.0.0"},
+                check=False,
+            )
+            self.assertEqual(stale.returncode, 10)
+            self.assertIn(f"Run '{PEER.resolve() / 'upgrade'}'", stale.stderr)
+
     def test_bootstrap_installs_configures_and_verifies_latest_release(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
